@@ -1,2 +1,2 @@
 # STAGE
-Summer stage at Cermics
+Summer stage at CERMICS

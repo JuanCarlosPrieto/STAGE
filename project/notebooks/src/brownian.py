@@ -17,6 +17,7 @@ class BrownianMotion:
 
         if initial_position is None:
             initial_position = np.zeros(dimension)  # Default initial position is the origin
+    
         self.positions = [initial_position]  # Start at the specified initial position        
 
 
