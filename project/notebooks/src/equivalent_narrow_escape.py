@@ -1,9 +1,11 @@
-from .geometry_utilities import find_intersection
 from .visualization import add_colored_path_2d
 import matplotlib.pyplot as plt
 import numpy as np
 
-class NaiveNarrowEscape:
+
+# For this case we'll have escape sections, as soon as the particle gets to one of this section
+# it will be considered it scaped
+class EquivalentNarrowEscape:
     def __init__(self, brownian_motion, surface, escapes):
         self.brownian_motion = brownian_motion
         self.surface = surface
@@ -24,13 +26,13 @@ class NaiveNarrowEscape:
             brownian_motion.simulate()  # Simulate the Brownian motion if not already done
         
 
-    def check_escape(self, intersection_point):
+    def check_escape(self, point):
         """
         Check if the intersection point satisfies any of the escape conditions.
         
         Parameters
         ----------
-        intersection_point : array-like
+        point : array-like
             The point to check for escape conditions.
         
         Returns
@@ -39,13 +41,37 @@ class NaiveNarrowEscape:
             True if the point satisfies any escape condition, False otherwise.
         """
         for escape in self.escapes:
-            if escape.is_valid_escape(intersection_point):
+            if escape.is_valid_escape(point):
                 return True
         return False
+    
+
+    def escape_index(self, point):
+        '''
+        Return index of the escape used by the particle
+
+        Parameters
+        ----------
+        point : array-like
+            The point to check for escape conditions.}
+        
+        Returns
+        -------
+        int
+            index
+        '''
+        if not self.check_escape(point):
+            return None
+        
+        for i, escape in enumerate(self.escapes):
+            if escape.is_valid_escape(point):
+                return i
+        
+        return None
         
     
 
-    def run_simulation_straight_exit(self, max_steps=1e6):
+    def run_simulation(self, max_steps=1e6):
         """
         Run the naive narrow escape simulation.
 
@@ -67,21 +93,19 @@ class NaiveNarrowEscape:
                 a = self.brownian_motion.positions[i]
                 b = self.brownian_motion.positions[i + 1]
 
+                # Particle got to one of the escapes
+                if self.check_escape(b):
+                        del self.brownian_motion.positions[i + 2:]  # Remove all positions after the exit
+                        return self.escape_index(b), i * self.brownian_motion.delta_t  # Return the escape point if found and the corresponding time
+
                 if self.surface.is_inside(b):
                     continue  # No escape, continue to the next step
 
-                index = self.surface.exit_surface(b)
-                intersection_point = find_intersection(self.surface.functions[index], a, b)
-                
-                if intersection_point is not None:
-                    if self.check_escape(intersection_point):
-                        del self.brownian_motion.positions[i + 2:]  # Remove all positions after the exit
-                        return intersection_point, i * self.brownian_motion.delta_t  # Return the escape point if found and the corresponding time
-                    else:
-                        del self.brownian_motion.positions[i + 1:]  # Remove all positions after the exit (no more valid)
-                        self.brownian_motion.positions.append(self.brownian_motion.positions[-1]) # Append the last valid position (Metroplis algorithm)
-                        curr = i
-                        break  # Break to restart the loop with the updated positions
+
+                del self.brownian_motion.positions[i + 1:]  # Remove all positions after the exit (no more valid)
+                self.brownian_motion.positions.append(self.brownian_motion.positions[-1]) # Append the last valid position (Metroplis algorithm)
+                curr = i
+                break  # Break to restart the loop with the updated positions
 
             self.brownian_motion.simulate()  # Continue the simulation from the last valid position
             
@@ -123,7 +147,9 @@ class NaiveNarrowEscape:
             show_points=show_points,
         )
 
-        self.surface.plot_boundary_2d(ax=ax, escape_checker=self.check_escape, xlim=xlim, ylim=ylim)
+        self.surface.plot_boundary_2d(ax=ax, xlim=xlim, ylim=ylim)
+        for escape in self.escapes:
+            escape.plot_escape(ax=ax)
 
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
