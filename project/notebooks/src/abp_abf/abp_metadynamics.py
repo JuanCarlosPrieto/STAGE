@@ -404,3 +404,208 @@ class ABPMetaDynamics:
             plt.savefig(savepath, dpi=300, bbox_inches="tight")
 
         plt.show()
+
+
+    def _evaluate_potential_on_grid(
+        self,
+        potential_type,
+        x_range=(-2, 2),
+        y_range=(-2, 2),
+        num_points=100
+    ):
+        """
+        Evaluate one of the potentials on a 2D grid.
+
+        potential_type can be:
+        - "original"
+        - "biasing"
+        - "final"
+        """
+
+        x_values = np.linspace(x_range[0], x_range[1], num_points)
+        y_values = np.linspace(y_range[0], y_range[1], num_points)
+
+        X, Y = np.meshgrid(x_values, y_values)
+        Z = np.zeros_like(X, dtype=float)
+
+        for i in range(X.shape[0]):
+            for j in range(X.shape[1]):
+                point = np.array([X[i, j], Y[i, j]])
+
+                if potential_type == "original":
+                    Z[i, j] = self.b.potential_at(point)
+
+                elif potential_type == "biasing":
+                    Z[i, j] = self.b_vias.potential_at(point)
+
+                elif potential_type == "final":
+                    Z[i, j] = (
+                        self.b.potential_at(point)
+                        + self.b_vias.potential_at(point)
+                    )
+
+                else:
+                    raise ValueError(
+                        "potential_type must be 'original', 'biasing', or 'final'"
+                    )
+
+        return X, Y, Z
+
+
+    def plot_potential_contour(
+        self,
+        ax,
+        potential_type="final",
+        x_range=(-2, 2),
+        y_range=(-2, 2),
+        num_points=100,
+        levels=20,
+        title=None,
+        cmap="viridis",
+        add_colorbar=True
+    ):
+        """
+        Plot level curves of a 2D potential on an existing axis.
+        """
+
+        X, Y, Z = self._evaluate_potential_on_grid(
+            potential_type=potential_type,
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points
+        )
+
+        contour = ax.contourf(X, Y, Z, levels=levels, cmap=cmap)
+        ax.contour(X, Y, Z, levels=levels, colors="black", linewidths=0.5)
+
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(title if title is not None else f"{potential_type.capitalize()} potential")
+        ax.grid(True)
+
+        if add_colorbar:
+            ax.figure.colorbar(contour, ax=ax, shrink=0.85)
+
+        return ax
+    
+
+    def plot_potential_surface(
+        self,
+        ax,
+        potential_type="final",
+        x_range=(-2, 2),
+        y_range=(-2, 2),
+        num_points=80,
+        title=None,
+        cmap="viridis"
+    ):
+        """
+        Plot a 3D surface of a 2D potential on an existing 3D axis.
+        """
+
+        X, Y, Z = self._evaluate_potential_on_grid(
+            potential_type=potential_type,
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points
+        )
+
+        surface = ax.plot_surface(X, Y, Z, cmap=cmap, edgecolor="none", alpha=0.9)
+
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_zlabel("V(x, y)")
+        ax.set_title(title if title is not None else f"{potential_type.capitalize()} potential")
+
+        ax.figure.colorbar(surface, ax=ax, shrink=0.7, pad=0.1)
+
+        return ax
+    
+
+
+    def plot_all_potentials_2d_3d(
+        self,
+        x_range=(-2, 2),
+        y_range=(-2, 2),
+        num_points_contour=100,
+        num_points_surface=80,
+        levels=20,
+        savepath=None
+    ):
+        """
+        Plot 6 graphics:
+        - 3 contour plots
+        - 3 3D surface plots
+        """
+
+        fig = plt.figure(figsize=(18, 10))
+
+        ax1 = fig.add_subplot(2, 3, 1)
+        self.plot_potential_contour(
+            ax1,
+            potential_type="original",
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points_contour,
+            levels=levels,
+            title="Original Potential - Contours"
+        )
+
+        ax2 = fig.add_subplot(2, 3, 2)
+        self.plot_potential_contour(
+            ax2,
+            potential_type="biasing",
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points_contour,
+            levels=levels,
+            title="Biasing Potential - Contours"
+        )
+
+        ax3 = fig.add_subplot(2, 3, 3)
+        self.plot_potential_contour(
+            ax3,
+            potential_type="final",
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points_contour,
+            levels=levels,
+            title="Final Potential - Contours"
+        )
+
+        ax4 = fig.add_subplot(2, 3, 4, projection="3d")
+        self.plot_potential_surface(
+            ax4,
+            potential_type="original",
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points_surface,
+            title="Original Potential - Surface"
+        )
+
+        ax5 = fig.add_subplot(2, 3, 5, projection="3d")
+        self.plot_potential_surface(
+            ax5,
+            potential_type="biasing",
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points_surface,
+            title="Biasing Potential - Surface"
+        )
+
+        ax6 = fig.add_subplot(2, 3, 6, projection="3d")
+        self.plot_potential_surface(
+            ax6,
+            potential_type="final",
+            x_range=x_range,
+            y_range=y_range,
+            num_points=num_points_surface,
+            title="Final Potential - Surface"
+        )
+
+        fig.tight_layout()
+
+        if savepath is not None:
+            fig.savefig(savepath, dpi=300, bbox_inches="tight")
+
+        plt.show()
