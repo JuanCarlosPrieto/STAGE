@@ -15,3 +15,14 @@ class Statistics:
         plt.legend()
         plt.grid()
         plt.show()
+
+
+    @staticmethod
+    def plot_histogram(data, bins=30, xlabel='Data', ylabel='Frequency', title='Histogram'):
+        plt.figure(figsize=(10, 6))
+        plt.hist(data, bins=bins, alpha=0.7, color='blue', edgecolor='black')
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.grid()
+        plt.show()

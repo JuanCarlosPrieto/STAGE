@@ -1,5 +1,3 @@
-# Brownian Motion Simulation
-
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -7,31 +5,53 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-class BrownianMotion:
-    def __init__(self, num_steps, delta_t, dimension=1, D=1.0, initial_position=None, b=lambda x: 0):
+from .transition_detector import TransitionDetector
+
+class ABPMetaDynamics:
+    def __init__(self, num_steps, td, delta_t, dimension=1, D=1.0, initial_position=None, b=lambda x: 0, W=0.1, sigma=0.1):
+        # num_steps: Number of time steps to simulate before adding a new biasing potential
+
         self.num_steps = num_steps
+        self.td = td
         self.delta_t = delta_t
         self.dimension = dimension  # Dimension of the Brownian motion
         self.D = D  # Diffusion coefficient
-        self.b = b  # Drift term
+        self.initial_position = initial_position if initial_position is not None else np.zeros(dimension)
+        self.b = b  # Drift function
+        self.W = W  # Height of the Gaussian biasing potential
+        self.sigma = sigma  # Width of the Gaussian biasing potential
 
         if initial_position is None:
             initial_position = np.zeros(dimension)  # Default initial position is the origin
     
-        self.positions = [initial_position]  # Start at the specified initial position        
+        self.positions = [initial_position]  # Start at the specified initial position
 
-
-    def simulate(self):
+    def simulate_steps(self):
         rng = np.random.default_rng()  # Use the new random number generator
 
         for _ in range(1, self.num_steps):
-            drift = self.b(self.positions[-1]) * self.delta_t  # Drift term based on the current position
+            drift = -self.b.potential_prime_at(self.positions[-1]) * self.delta_t  # Drift term based on the current position
             step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
             step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
             new_position = self.positions[-1] + step + drift  # Add drift term
             self.positions.append(new_position)
-        return np.array(self.positions)
+        
+        self.td.positions = np.array(self.positions[-self.num_steps:])  # Update the transition detector with the new positions
+
     
+    def simulate(self, max_iters=1e6):
+        while len(self.positions) < max_iters:
+            self.simulate_steps()
+            self.b.add_gaussian(self.positions[-1], self.W, self.sigma)
+
+            if self.td.detect_transition() is not None:
+                break
+        
+        self.td.positions = self.td.positions
+        escape_index = self.td.detect_transition()
+        return escape_index, escape_index * self.delta_t, self.positions[escape_index] if escape_index is not None else None
+
+
 
     @staticmethod
     def plot_brownian_path(
@@ -242,7 +262,7 @@ class BrownianMotion:
             ax.set_ylabel("Y")
             ax.set_zlabel("Z")
 
-            BrownianMotion.set_axes_equal_3d(ax, path)
+            ABPMetaDynamics.set_axes_equal_3d(ax, path)
 
             ax.legend()
 
