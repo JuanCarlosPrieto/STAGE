@@ -5,10 +5,10 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-from .transition_detector import TransitionDetector
+from .potential import Potential
 
 class ABPMetaDynamics:
-    def __init__(self, num_steps, td, delta_t, dimension=1, D=1.0, initial_position=None, b=lambda x: 0, W=0.1, sigma=0.1):
+    def __init__(self, num_steps, td, delta_t, dimension=1, D=1.0, initial_position=None, b=lambda x: 0, W=0.1, sigma=0.001):
         # num_steps: Number of time steps to simulate before adding a new biasing potential
 
         self.num_steps = num_steps
@@ -18,8 +18,10 @@ class ABPMetaDynamics:
         self.D = D  # Diffusion coefficient
         self.initial_position = initial_position if initial_position is not None else np.zeros(dimension)
         self.b = b  # Drift function
+        self.b_vias = Potential(dimension, lambda x: 0, lambda x: 0, lambda x: 0)  # Initialize the biasing potential as zero
         self.W = W  # Height of the Gaussian biasing potential
         self.sigma = sigma  # Width of the Gaussian biasing potential
+        self.real_time = 0.0
 
         if initial_position is None:
             initial_position = np.zeros(dimension)  # Default initial position is the origin
@@ -30,10 +32,11 @@ class ABPMetaDynamics:
         rng = np.random.default_rng()  # Use the new random number generator
 
         for _ in range(1, self.num_steps):
-            drift = -self.b.potential_prime_at(self.positions[-1]) * self.delta_t  # Drift term based on the current position
+            drift = -(self.b.potential_prime_at(self.positions[-1]) + self.b_vias.potential_prime_at(self.positions[-1])) * self.delta_t  # Drift term based on the current position
             step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
             step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
             new_position = self.positions[-1] + step + drift  # Add drift term
+            self.real_time += np.exp(self.b_vias.potential_at(new_position)) * self.delta_t  # Update the acceleration factor based on the biasing potential
             self.positions.append(new_position)
         
         self.td.positions = np.array(self.positions[-self.num_steps:])  # Update the transition detector with the new positions
@@ -42,15 +45,14 @@ class ABPMetaDynamics:
     def simulate(self, max_iters=1e6):
         while len(self.positions) < max_iters:
             self.simulate_steps()
-            self.b.add_gaussian(self.positions[-1], self.W, self.sigma)
+            self.b_vias.add_gaussian(self.positions[-1], self.W, self.sigma)
 
             if self.td.detect_transition() is not None:
                 break
         
         self.td.positions = self.td.positions
         escape_index = self.td.detect_transition()
-        return escape_index, escape_index * self.delta_t, self.positions[escape_index] if escape_index is not None else None
-
+        return self.real_time, escape_index * self.delta_t
 
 
     @staticmethod
@@ -307,3 +309,98 @@ class ABPMetaDynamics:
         ax.set_xlim(x_middle - radius, x_middle + radius)
         ax.set_ylim(y_middle - radius, y_middle + radius)
         ax.set_zlim(z_middle - radius, z_middle + radius)
+
+
+    def plot_final_potential(self, ax, x_range=(-2, 2), num_points=1000, title=None, savepath=None):
+        """
+        Plot the final potential landscape (original + biasing potential)
+        on an existing matplotlib axis.
+        """
+
+        x_values = np.linspace(x_range[0], x_range[1], num_points)
+
+        y_values = np.array([
+            self.b.potential_at(np.array([x]))
+            + self.b_vias.potential_at(np.array([x]))
+            for x in x_values
+        ])
+
+        ax.plot(x_values, y_values, linewidth=2.0)
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Potential")
+        ax.set_title(title if title is not None else "Final Potential Landscape")
+        ax.grid(True)
+
+        if savepath is not None:
+            ax.figure.savefig(savepath, dpi=300, bbox_inches="tight")
+
+        return ax
+    
+
+    def plot_original_potential(self, ax, x_range=(-2, 2), num_points=1000, title=None, savepath=None):
+        """
+        Plot the original potential landscape on an existing matplotlib axis.
+        """
+
+        x_values = np.linspace(x_range[0], x_range[1], num_points)
+
+        y_values = np.array([
+            self.b.potential_at(np.array([x]))
+            for x in x_values
+        ])
+
+        ax.plot(x_values, y_values, linewidth=2.0)
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Potential")
+        ax.set_title(title if title is not None else "Original Potential Landscape")
+        ax.grid(True)
+
+        if savepath is not None:
+            ax.figure.savefig(savepath, dpi=300, bbox_inches="tight")
+
+        return ax
+    
+
+    def plot_biasing_potential(self, ax, x_range=(-2, 2), num_points=1000, title=None, savepath=None):
+        """
+        Plot the biasing potential landscape on an existing matplotlib axis.
+        """
+
+        x_values = np.linspace(x_range[0], x_range[1], num_points)
+
+        y_values = np.array([
+            self.b_vias.potential_at(np.array([x]))
+            for x in x_values
+        ])
+
+        ax.plot(x_values, y_values, linewidth=2.0)
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Potential")
+        ax.set_title(title if title is not None else "Biasing Potential Landscape")
+        ax.grid(True)
+
+        if savepath is not None:
+            ax.figure.savefig(savepath, dpi=300, bbox_inches="tight")
+
+        return ax
+
+
+    def plot_all_potentials(self, x_range=(-2, 2), num_points=1000, title=None, savepath=None):
+        """
+        Plot the original, biasing, and final potential landscapes on a single figure.
+        """
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        self.plot_original_potential(ax, x_range=x_range, num_points=num_points, title="Original Potential", savepath=None)
+        self.plot_biasing_potential(ax, x_range=x_range, num_points=num_points, title="Biasing Potential", savepath=None)
+        self.plot_final_potential(ax, x_range=x_range, num_points=num_points, title="Final Potential", savepath=None)
+
+        ax.set_title(title if title is not None else "Potential Landscapes")
+        ax.legend(["Original Potential", "Biasing Potential", "Final Potential"])
+        ax.grid(True)
+
+        if savepath is not None:
+            plt.savefig(savepath, dpi=300, bbox_inches="tight")
+
+        plt.show()
