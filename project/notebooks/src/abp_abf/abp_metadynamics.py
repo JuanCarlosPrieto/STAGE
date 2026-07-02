@@ -22,6 +22,7 @@ class ABPMetaDynamics:
         self.W = W  # Height of the Gaussian biasing potential
         self.sigma = sigma  # Width of the Gaussian biasing potential
         self.real_time = 0.0
+        self.weights = [1]  # Initialize weights for the biasing potential
 
         if initial_position is None:
             initial_position = np.zeros(dimension)  # Default initial position is the origin
@@ -36,14 +37,16 @@ class ABPMetaDynamics:
             step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
             step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
             new_position = self.positions[-1] + step + drift  # Add drift term
-            self.real_time += np.exp(self.b_vias.potential_at(new_position)) * self.delta_t  # Update the acceleration factor based on the biasing potential
+            self.real_time += np.exp(self.b_vias.potential_at(new_position) / self.D) * self.delta_t  # Update the acceleration factor based on the biasing potential
             self.positions.append(new_position)
+            self.weights.append(np.exp(self.b_vias.potential_at(new_position) / self.D))  # Store the weight for the new position
         
         self.td.positions = np.array(self.positions[-self.num_steps:])  # Update the transition detector with the new positions
 
     
     def simulate(self, max_iters=1e6):
         while len(self.positions) < max_iters:
+            print(len(self.positions), end="\r")  # Print the current number of positions simulated
             self.simulate_steps()
             self.b_vias.add_gaussian(self.positions[-1], self.W, self.sigma)
 
@@ -52,7 +55,94 @@ class ABPMetaDynamics:
         
         self.td.positions = self.td.positions
         escape_index = self.td.detect_transition()
-        return self.real_time, escape_index * self.delta_t
+        return self.real_time, escape_index * self.delta_t if escape_index is not None else None
+
+
+    def plot_histogram_with_weights(self, ax, positions, bins=30, title=None, savepath=None):
+        """
+        Plot a histogram of the positions with weights.
+        """
+
+        positions_array = np.array(positions)
+        weights_array = np.array(self.weights)
+
+        ax.hist(positions_array, bins=bins, weights=weights_array, density=True, alpha=0.7, color='blue', edgecolor='black')
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Weighted Density")
+        ax.set_title(title if title is not None else "Histogram of Positions with Weights")
+        ax.grid(True)
+
+        if savepath is not None:
+            ax.savefig(savepath, dpi=300, bbox_inches="tight")
+
+        return ax
+
+
+    def plot_histogram_vs_distribution(self, positions, bins=30, dimension=1, axis=0):
+        """
+        Plot a histogram of the positions with weights and compare it to the theoretical distribution.
+        """
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        positions = np.array(positions)
+        if dimension == 1:
+            self.plot_histogram_with_weights(ax, positions[:, 0], bins=bins, title="Histogram of Positions with Weights")
+            
+        elif dimension == 2:
+            if axis not in [0, 1]:
+                raise ValueError("For 2D, axis must be 0 or 1.")
+            
+            if axis == 0:
+                self.plot_histogram_with_weights(ax, positions[:, 0], bins=bins, title="Histogram of Positions (X-axis) with Weights")
+            else:
+                self.plot_histogram_with_weights(ax, positions[:, 1], bins=bins, title="Histogram of Positions (Y-axis) with Weights")
+
+        x_values = None
+        theoretical_distribution = None
+        # Plot the theoretical distribution
+        if dimension == 1:
+            x_values = np.linspace(np.min(positions), np.max(positions), 100)
+            theoretical_distribution = np.array([np.exp(-self.b.potential_at(np.array([x])) / self.D) for x in x_values])
+            theoretical_distribution /= np.trapezoid(theoretical_distribution, x_values)  # Normalize
+
+        elif dimension == 2:
+            if axis not in [0, 1]:
+                raise ValueError("For 2D, axis must be 0 or 1.")
+            
+            if axis == 0:
+                x_values = np.linspace(np.min(positions[:, 0]), np.max(positions[:, 0]), 100)
+                y_values = np.linspace(np.min(positions[:, 1]), np.max(positions[:, 1]), 100)
+
+                X, Y = np.meshgrid(x_values, y_values)
+                points = np.column_stack([X.ravel(), Y.ravel()])
+
+                V_flat = np.array([self.b.potential_at(point) for point in points])
+                V_grid = V_flat.reshape(Y.shape)
+                rho_grid = np.exp(-V_grid / self.D)
+
+                rho_x = np.trapezoid(rho_grid, y_values, axis=0)
+                rho_x /= np.trapezoid(rho_x, x_values)
+                theoretical_distribution = rho_x
+            
+            else:
+                x_values = np.linspace(np.min(positions[:, 1]), np.max(positions[:, 1]), 100)
+                y_values = np.linspace(np.min(positions[:, 0]), np.max(positions[:, 0]), 100)
+
+                X, Y = np.meshgrid(x_values, y_values)
+                points = np.column_stack([Y.ravel(), X.ravel()])
+
+                V_flat = np.array([self.b.potential_at(point) for point in points])
+                V_grid = V_flat.reshape(Y.shape)
+                rho_grid = np.exp(-V_grid / self.D)
+
+                rho_x = np.trapezoid(rho_grid, y_values, axis=0)
+                rho_x /= np.trapezoid(rho_x, x_values)
+                theoretical_distribution = rho_x
+
+        ax.plot(x_values, theoretical_distribution, color='red', linewidth=2.0, label='Theoretical Distribution')
+        ax.legend()
+
+        plt.show()
 
 
     @staticmethod
