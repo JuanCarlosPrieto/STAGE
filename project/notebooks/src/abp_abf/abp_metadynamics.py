@@ -46,7 +46,6 @@ class ABPMetaDynamics:
     
     def simulate(self, max_iters=1e6):
         while len(self.positions) < max_iters:
-            print(len(self.positions), end="\r")  # Print the current number of positions simulated
             self.simulate_steps()
             self.b_vias.add_gaussian(self.positions[-1], self.W, self.sigma)
 
