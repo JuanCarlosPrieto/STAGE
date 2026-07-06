@@ -1,3 +1,0 @@
-Simulación de potenciales con cierto delta V
-Simulación de narrow escape simple de ser posible
-Leer los documentos
