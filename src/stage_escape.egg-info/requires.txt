@@ -1,0 +1,11 @@
+numpy
+scipy
+matplotlib
+tqdm
+
+[dev]
+ipykernel
+jupyterlab
+pytest
+black
+ruff
