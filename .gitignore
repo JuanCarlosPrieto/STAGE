@@ -1,4 +1,33 @@
+# Secrets
 token.txt
+.env
+.env.local
+
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Results generated locally
+results/raw/
+results/tmp/
+*.npy
+*.npz
+*.pkl
+*.log
+
+# Figures can be tracked only if they are final
+# results/figures/
