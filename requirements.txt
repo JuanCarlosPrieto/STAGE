@@ -98,7 +98,6 @@ Send2Trash==2.1.0
 six==1.17.0
 soupsieve==2.8.4
 stack-data==0.6.3
--e git+https://github.com/JuanCarlosPrieto/STAGE.git@931f93f0c641b5829d111f78cf168e57bd42c486#egg=stage_escape
 terminado==0.18.1
 tinycss2==1.5.1
 tornado==6.5.7

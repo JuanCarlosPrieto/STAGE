@@ -31,3 +31,7 @@ results/tmp/
 
 # Figures can be tracked only if they are final
 # results/figures/
+
+*.egg-info/
+build/
+dist/
