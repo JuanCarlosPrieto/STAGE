@@ -331,3 +331,64 @@ def plot_brownian_path(
         plt.savefig(savepath, dpi=300, bbox_inches="tight")
 
     plt.show()
+
+
+def plot_histogram_density(
+    ax,
+    bin_centers,
+    density,
+    title=None,
+    label="Weighted histogram",
+):
+    """
+    Plot a precomputed histogram density.
+    """
+    ax.plot(
+        bin_centers,
+        density,
+        marker="o",
+        linestyle="-",
+        label=label,
+    )
+
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Weighted density")
+    ax.set_title(title if title is not None else "Weighted histogram")
+    ax.grid(True)
+
+    return ax
+
+
+def plot_histogram_vs_distribution(
+    ax,
+    bin_centers,
+    histogram_density,
+    x_theory,
+    theoretical_density,
+    title=None,
+):
+    """
+    Plot a weighted histogram against a theoretical distribution.
+    """
+    ax.plot(
+        bin_centers,
+        histogram_density,
+        marker="o",
+        linestyle="-",
+        label="Weighted histogram",
+    )
+
+    ax.plot(
+        x_theory,
+        theoretical_density,
+        linewidth=2.0,
+        label="Theoretical distribution",
+    )
+
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Density")
+    ax.set_title(title if title is not None else "Histogram vs theoretical distribution")
+    ax.grid(True)
+    ax.legend()
+
+    return ax

@@ -8,10 +8,10 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from .potential import Potential
 
 class ABPMetaDynamics:
-    def __init__(self, num_steps, td, delta_t, dimension=1, D=1.0, initial_position=None, b=lambda x: 0, W=0.1, sigma=0.001):
+    def __init__(self, num_steps, td, delta_t, dimension=1, D=1.0, initial_position=None, b=Potential(1, lambda x: 0, lambda x: 0, lambda x: 0), W=0.1, sigma=0.001):
         # num_steps: Number of time steps to simulate before adding a new biasing potential
 
-        self.num_steps = num_steps
+        self.num_steps = num_steps + 1
         self.td = td
         self.delta_t = delta_t
         self.dimension = dimension  # Dimension of the Brownian motion
@@ -37,6 +37,7 @@ class ABPMetaDynamics:
             step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
             step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
             new_position = self.positions[-1] + step + drift  # Add drift term
+            print(new_position)
             self.real_time += np.exp(self.b_vias.potential_at(new_position) / self.D) * self.delta_t  # Update the acceleration factor based on the biasing potential
             self.positions.append(new_position)
             self.weights.append(np.exp(self.b_vias.potential_at(new_position) / self.D))  # Store the weight for the new position
@@ -45,7 +46,7 @@ class ABPMetaDynamics:
 
     
     def simulate(self, max_iters=1e6):
-        while len(self.positions) < max_iters:
+        for _ in range(int(max_iters)):
             self.simulate_steps()
             self.b_vias.add_gaussian(self.positions[-1], self.W, self.sigma)
 
@@ -57,91 +58,139 @@ class ABPMetaDynamics:
         return self.real_time, escape_index * self.delta_t if escape_index is not None else None
 
 
-    def plot_histogram_with_weights(self, ax, positions, bins=30, title=None, savepath=None):
+    def plot_histogram_with_weights(
+        self,
+        ax,
+        positions,
+        bins=30,
+        title=None,
+        savepath=None,
+        axis=0,
+    ):
         """
-        Plot a histogram of the positions with weights.
+        Backward-compatible wrapper for weighted histogram plotting.
         """
+        from .distribution_analysis import (
+            extract_coordinate,
+            weighted_histogram_density,
+        )
+        from ..visualization import plot_histogram_density
 
-        positions_array = np.array(positions)
-        weights_array = np.array(self.weights)
+        values = extract_coordinate(
+            positions=positions,
+            dimension=self.dimension,
+            axis=axis,
+        )
 
-        ax.hist(positions_array, bins=bins, weights=weights_array, density=True, alpha=0.7, color='blue', edgecolor='black')
-        ax.set_xlabel("Position")
-        ax.set_ylabel("Weighted Density")
-        ax.set_title(title if title is not None else "Histogram of Positions with Weights")
-        ax.grid(True)
+        weights = np.asarray(self.weights, dtype=float)
+
+        if len(weights) != len(values):
+            raise ValueError(
+                f"weights and positions must have the same length. "
+                f"Got {len(weights)} weights and {len(values)} positions."
+            )
+
+        bin_centers, density, _, _ = weighted_histogram_density(
+            values=values,
+            weights=weights,
+            bins=bins,
+        )
+
+        plot_histogram_density(
+            ax=ax,
+            bin_centers=bin_centers,
+            density=density,
+            title=title,
+        )
 
         if savepath is not None:
-            ax.savefig(savepath, dpi=300, bbox_inches="tight")
+            ax.figure.savefig(savepath, dpi=300, bbox_inches="tight")
 
         return ax
 
 
-    def plot_histogram_vs_distribution(self, positions, bins=30, dimension=1, axis=0):
+    def plot_histogram_vs_distribution(
+        self,
+        positions,
+        bins=30,
+        dimension=None,
+        axis=0,
+        num_theory_points=100,
+    ):
         """
-        Plot a histogram of the positions with weights and compare it to the theoretical distribution.
+        Backward-compatible wrapper for histogram vs theoretical distribution.
         """
+        from .distribution_analysis import (
+            extract_coordinate,
+            weighted_histogram_density,
+            theoretical_density_1d,
+            theoretical_marginal_2d,
+        )
+        from ..visualization import plot_histogram_vs_distribution
+
+        dimension = self.dimension if dimension is None else dimension
+
+        positions = np.asarray(positions, dtype=float)
+        weights = np.asarray(self.weights, dtype=float)
+
+        values = extract_coordinate(
+            positions=positions,
+            dimension=dimension,
+            axis=axis,
+        )
+
+        if len(weights) != len(values):
+            raise ValueError(
+                f"weights and positions must have the same length. "
+                f"Got {len(weights)} weights and {len(values)} positions."
+            )
+
+        bin_centers, histogram_density, _, _ = weighted_histogram_density(
+            values=values,
+            weights=weights,
+            bins=bins,
+        )
+
+        if dimension == 1:
+            x_theory = np.linspace(np.min(values), np.max(values), num_theory_points)
+
+            theoretical_density = theoretical_density_1d(
+                potential=self.b,
+                D=self.D,
+                x_values=x_theory,
+            )
+
+        elif dimension == 2:
+            if axis not in [0, 1]:
+                raise ValueError("For 2D, axis must be 0 or 1.")
+
+            x_values = np.linspace(np.min(positions[:, 0]), np.max(positions[:, 0]), num_theory_points)
+            y_values = np.linspace(np.min(positions[:, 1]), np.max(positions[:, 1]), num_theory_points)
+
+            x_theory, theoretical_density = theoretical_marginal_2d(
+                potential=self.b,
+                D=self.D,
+                x_values=x_values,
+                y_values=y_values,
+                axis=axis,
+            )
+
+        else:
+            raise ValueError("Only dimensions 1 and 2 are supported.")
 
         fig, ax = plt.subplots(figsize=(8, 5))
-        positions = np.array(positions)
-        if dimension == 1:
-            self.plot_histogram_with_weights(ax, positions[:, 0], bins=bins, title="Histogram of Positions with Weights")
-            
-        elif dimension == 2:
-            if axis not in [0, 1]:
-                raise ValueError("For 2D, axis must be 0 or 1.")
-            
-            if axis == 0:
-                self.plot_histogram_with_weights(ax, positions[:, 0], bins=bins, title="Histogram of Positions (X-axis) with Weights")
-            else:
-                self.plot_histogram_with_weights(ax, positions[:, 1], bins=bins, title="Histogram of Positions (Y-axis) with Weights")
 
-        x_values = None
-        theoretical_distribution = None
-        # Plot the theoretical distribution
-        if dimension == 1:
-            x_values = np.linspace(np.min(positions), np.max(positions), 100)
-            theoretical_distribution = np.array([np.exp(-self.b.potential_at(np.array([x])) / self.D) for x in x_values])
-            theoretical_distribution /= np.trapezoid(theoretical_distribution, x_values)  # Normalize
-
-        elif dimension == 2:
-            if axis not in [0, 1]:
-                raise ValueError("For 2D, axis must be 0 or 1.")
-            
-            if axis == 0:
-                x_values = np.linspace(np.min(positions[:, 0]), np.max(positions[:, 0]), 100)
-                y_values = np.linspace(np.min(positions[:, 1]), np.max(positions[:, 1]), 100)
-
-                X, Y = np.meshgrid(x_values, y_values)
-                points = np.column_stack([X.ravel(), Y.ravel()])
-
-                V_flat = np.array([self.b.potential_at(point) for point in points])
-                V_grid = V_flat.reshape(Y.shape)
-                rho_grid = np.exp(-V_grid / self.D)
-
-                rho_x = np.trapezoid(rho_grid, y_values, axis=0)
-                rho_x /= np.trapezoid(rho_x, x_values)
-                theoretical_distribution = rho_x
-            
-            else:
-                x_values = np.linspace(np.min(positions[:, 1]), np.max(positions[:, 1]), 100)
-                y_values = np.linspace(np.min(positions[:, 0]), np.max(positions[:, 0]), 100)
-
-                X, Y = np.meshgrid(x_values, y_values)
-                points = np.column_stack([Y.ravel(), X.ravel()])
-
-                V_flat = np.array([self.b.potential_at(point) for point in points])
-                V_grid = V_flat.reshape(Y.shape)
-                rho_grid = np.exp(-V_grid / self.D)
-
-                rho_x = np.trapezoid(rho_grid, y_values, axis=0)
-                rho_x /= np.trapezoid(rho_x, x_values)
-                theoretical_distribution = rho_x
-
-        ax.plot(x_values, theoretical_distribution, color='red', linewidth=2.0, label='Theoretical Distribution')
-        ax.legend()
+        plot_histogram_vs_distribution(
+            ax=ax,
+            bin_centers=bin_centers,
+            histogram_density=histogram_density,
+            x_theory=x_theory,
+            theoretical_density=theoretical_density,
+        )
 
         plt.show()
+
+        return ax
 
 
     @staticmethod

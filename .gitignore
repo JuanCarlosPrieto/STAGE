@@ -1,5 +1,6 @@
 # Secrets
 token.txt
+show.txt
 .env
 .env.local
 
