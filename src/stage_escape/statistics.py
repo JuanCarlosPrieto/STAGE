@@ -69,3 +69,34 @@ class Statistics:
         lambda_param = 1 / (np.mean(filtered_data) - t_min)
         
         return lambda_param
+    
+
+    @staticmethod
+    def plot_graph_and_linear_adjustment(x, y, xlabel='X-axis', ylabel='Y-axis', title='Graph with Linear Adjustment'):
+        plt.figure(figsize=(10, 6))
+        plt.scatter(x, y, color='blue', label='Data Points')
+
+        # Perform linear regression
+        coefficients = np.polyfit(x, y, 1)
+        linear_fit = np.poly1d(coefficients)
+
+        # Plot the linear fit
+        plt.plot(x, linear_fit(x), color='red', label=f'Linear Fit: y = {coefficients[0]:.2f}x + {coefficients[1]:.2f}')
+        
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+
+    @staticmethod
+    def simple_plot(x, y, xlabel='X-axis', ylabel='Y-axis', title='Simple Plot'):
+        plt.figure(figsize=(10, 6))
+        plt.plot(x, y, marker='o', linestyle='-', color='blue')
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.grid()
+        plt.show()
