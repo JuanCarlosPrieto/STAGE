@@ -339,6 +339,8 @@ def plot_histogram_density(
     density,
     title=None,
     label="Weighted histogram",
+    xlabel="Position",
+    ylabel="Weighted density"
 ):
     """
     Plot a precomputed histogram density.
@@ -351,8 +353,8 @@ def plot_histogram_density(
         label=label,
     )
 
-    ax.set_xlabel("Position")
-    ax.set_ylabel("Weighted density")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(title if title is not None else "Weighted histogram")
     ax.grid(True)
 

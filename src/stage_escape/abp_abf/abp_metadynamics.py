@@ -37,7 +37,6 @@ class ABPMetaDynamics:
             step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
             step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
             new_position = self.positions[-1] + step + drift  # Add drift term
-            print(new_position)
             self.real_time += np.exp(self.b_vias.potential_at(new_position) / self.D) * self.delta_t  # Update the acceleration factor based on the biasing potential
             self.positions.append(new_position)
             self.weights.append(np.exp(self.b_vias.potential_at(new_position) / self.D))  # Store the weight for the new position

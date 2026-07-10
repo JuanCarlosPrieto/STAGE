@@ -103,8 +103,6 @@ class ABPEquivalentNarrowEscape:
                     continue  # No escape, continue to the next step
 
                 
-                print('I am here')
-                input()
                 del self.abp.positions[i + 1:]  # Remove all positions after the exit (no more valid)
                 self.abp.positions.append(self.abp.positions[-1]) # Append the last valid position (Metroplis algorithm)
                 curr = i
