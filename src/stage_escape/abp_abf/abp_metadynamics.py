@@ -7,30 +7,62 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 from .potential import Potential
 
+
 class ABPMetaDynamics:
-    def __init__(self, num_steps, td, delta_t, dimension=1, D=1.0, initial_position=None, b=Potential(1, lambda x: 0, lambda x: 0, lambda x: 0), W=0.1, sigma=0.001):
-        # num_steps: Number of time steps to simulate before adding a new biasing potential
+    def __init__(
+        self,
+        num_steps,
+        td,
+        delta_t,
+        dimension=1,
+        D=1.0,
+        initial_position=None,
+        b=Potential(
+            1,
+            lambda x: 0,
+            lambda x: 0,
+            lambda x: 0,
+        ),
+        W=0.1,
+        sigma=0.001,
+        seed=None,
+        rng=None,
+    ):
+        if seed is not None and rng is not None:
+            raise ValueError("Provide either seed or rng, not both.")
 
         self.num_steps = num_steps + 1
         self.td = td
         self.delta_t = delta_t
-        self.dimension = dimension  # Dimension of the Brownian motion
-        self.D = D  # Diffusion coefficient
-        self.initial_position = initial_position if initial_position is not None else np.zeros(dimension)
-        self.b = b  # Drift function
-        
+        self.dimension = dimension
+        self.D = D
+
+        self.initial_position = (
+            np.zeros(dimension, dtype=float)
+            if initial_position is None
+            else np.asarray(initial_position, dtype=float)
+        )
+
+        self.b = b
         self.centers = []
-        self.W = W  # Height of the Gaussian biasing potential
-        self.sigma = sigma  # Width of the Gaussian biasing potential
+        self.W = W
+        self.sigma = sigma
         self.real_time = 0.0
-        self.weights = [1]  # Initialize weights for the biasing potential
+        self.weights = [1.0]
 
-        if initial_position is None:
-            initial_position = np.zeros(dimension)  # Default initial position is the origin
-    
-        self.positions = [initial_position]  # Start at the specified initial position
+        self.seed = seed
+        self._external_rng = rng is not None
+        self.rng = (
+            rng
+            if rng is not None
+            else np.random.default_rng(seed)
+        )
 
-    
+        self.positions = [self.initial_position.copy()]
+
+    def _last_position(self):
+        return self.positions[-1]
+
     def bias_potential_at(self, x):
         """
         Evaluate the biasing potential at a given position x.
@@ -40,7 +72,6 @@ class ABPMetaDynamics:
             if np.abs(x - center).max() < 5 * self.sigma:  # Only compute if within 5 sigma of the center
                 total_bias += self.W * np.exp(-0.5 * np.sum((x - center) ** 2) / self.sigma ** 2)
         return total_bias
-    
 
     def bias_potential_prime_at(self, x):
         """
@@ -50,38 +81,65 @@ class ABPMetaDynamics:
         for center in self.centers:
             if np.abs(x - center).max() < 5 * self.sigma:  # Only compute if within 5 sigma of the center
                 diff = x - center
-                total_bias_prime += -self.W * (diff / self.sigma ** 2) * np.exp(-0.5 * np.sum(diff ** 2) / self.sigma ** 2)
+                total_bias_prime += (
+                    -self.W
+                    * (diff / self.sigma ** 2)
+                    * np.exp(-0.5 * np.sum(diff ** 2) / self.sigma ** 2)
+                )
         return total_bias_prime
 
-
     def simulate_steps(self):
-        rng = np.random.default_rng()  # Use the new random number generator
-
         for _ in range(1, self.num_steps):
-            drift = -(self.b.potential_prime_at(self.positions[-1]) + self.bias_potential_prime_at(self.positions[-1])) * self.delta_t  # Drift term based on the current position
-            step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
-            step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
-            new_position = self.positions[-1] + step + drift  # Add drift term           
+            current_position = self._last_position()
 
-            self.real_time += np.exp(self.bias_potential_at(new_position) / self.D) * self.delta_t  # Update the acceleration factor based on the biasing potential
+            physical_force = self.b.potential_prime_at(
+                current_position
+            )
+
+            bias_force = self.bias_potential_prime_at(
+                current_position
+            )
+
+            drift = -(
+                physical_force + bias_force
+            ) * self.delta_t
+
+            step_size = np.sqrt(
+                2.0 * self.D * self.delta_t
+            )
+
+            noise = self.rng.standard_normal(
+                self.dimension
+            )
+
+            step = step_size * noise
+            new_position = current_position + drift + step
+
+            bias_value = self.bias_potential_at(new_position)
+            weight = np.exp(bias_value / self.D)
+
+            self.real_time += weight * self.delta_t
             self.positions.append(new_position)
-            self.weights.append(np.exp(self.bias_potential_at(new_position) / self.D))  # Store the weight for the new position
+            self.weights.append(weight)
 
             self.td.positions = np.array([new_position])
-            if self.td.detect_transition() is not None:
-                break  # Stop simulation if a transition is detected
-        
-        self.td.positions = np.array(self.positions[-self.num_steps:])  # Update the transition detector with the new positions
-
-    
-    def simulate(self, max_iters=1e6):
-        for _ in range(int(max_iters)):
-            self.simulate_steps()
-            self.centers.append(self.positions[-1])  # Add the last position as a new center for the biasing potential
 
             if self.td.detect_transition() is not None:
                 break
-        
+
+        self.td.positions = np.asarray(
+            self.positions[-self.num_steps:],
+            dtype=float,
+        )
+
+    def simulate(self, max_iters=1e6):
+        for _ in range(int(max_iters)):
+            self.simulate_steps()
+            self.centers.append(self._last_position())  # Add the last position as a new center for the biasing potential
+
+            if self.td.detect_transition() is not None:
+                break
+
         self.td.positions = self.positions
         escape_index = self.td.detect_transition()
         return self.real_time, escape_index if escape_index is not None else None
