@@ -19,7 +19,7 @@ def find_intersection(phi, a, b):
         raise ValueError("The function must have opposite signs at the endpoints a and b.")
 
     def f(t):
-        return phi(a + t * (b - a))
+        return phi(a + t * (b - a)), t
 
     try:
         t_intersection = brentq(f, 0, 1)

@@ -9,21 +9,9 @@ class EquivalentNarrowEscape:
     def __init__(self, brownian_motion, surface, escapes):
         self.brownian_motion = brownian_motion
         self.surface = surface
-        self.escapes = escapes
+        self.escapes = tuple(escapes)
 
-        if brownian_motion.positions[0] is None:
-            raise ValueError("Initial position of Brownian motion cannot be None.")
-        
-        try:
-            if not surface.is_inside(brownian_motion.positions[0]):
-                raise ValueError("Initial position of Brownian motion must be inside the surface.")
-        
-        except Exception as e:
-            raise ValueError(f"Error checking if initial position is inside the surface: {e}, check the surface functions and the initial position.")
-        
-        if len(brownian_motion.positions) <= 1:
-            brownian_motion.num_steps = 1000  # Default number of steps if not set
-            brownian_motion.simulate()  # Simulate the Brownian motion if not already done
+        self._validate_initial_state()
         
 
     def check_escape(self, point):

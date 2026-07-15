@@ -103,3 +103,35 @@ def weighted_histogram_density(values, weights=None, bins=30, value_range=None):
     bin_centers, density = normalize_histogram_counts(counts, bin_edges)
 
     return bin_centers, density, counts, bin_edges
+
+
+def theoretical_density_1d(
+    potential,
+    x_values,
+    diffusion,
+):
+    x_values = np.asarray(x_values, dtype=float)
+
+    energy = np.array(
+        [
+            potential.potential_at(np.array([x]))
+            for x in x_values
+        ],
+        dtype=float,
+    )
+
+    unnormalized = np.exp(
+        -(energy - np.min(energy)) / diffusion
+    )
+
+    normalization = np.trapz(
+        unnormalized,
+        x_values,
+    )
+
+    if normalization <= 0:
+        raise ValueError(
+            "Theoretical density normalization is not positive."
+        )
+
+    return unnormalized / normalization

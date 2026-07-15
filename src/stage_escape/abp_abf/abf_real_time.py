@@ -80,91 +80,181 @@ class ABFRealTime:
             )
 
         return float(gradient[0])
+    
+    def _potential_gradient_scalar(self, position) -> float:
+        """Return the scalar derivative of a one-dimensional potential."""
+        gradient = np.asarray(
+            self.b.potential_prime_at(position),
+            dtype=float,
+        ).reshape(-1)
 
-    def simulate_steps(self):
-        for _ in range(1, self.num_steps):
-            last_position = self._last_position()
-            x = float(last_position.reshape(-1)[0])
-
-            if x < self.range[0] or x > self.range[1]:
-                raise ValueError(
-                    f"Position {last_position} is outside the configured "
-                    f"range {self.range}."
-                )
-
-            current_bin = self._current_bin()
-
-            physical_force = self._physical_force_at(
-                last_position
+        if gradient.size != 1:
+            raise ValueError(
+                "ABFRealTime only supports one-dimensional potentials. "
+                f"Received {gradient.size} gradient components."
             )
 
-            drift = (
-                -physical_force
-                + self.force_bias[current_bin]
-            ) * self.delta_t
+        return float(gradient[0])
+    
+    def _update_force_estimator(self, position) -> int:
+        """
+        Update the running mean-force estimator using one trajectory sample.
 
-            step_size = np.sqrt(
-                2.0 * self.D * self.delta_t
+        Returns
+        -------
+        int
+            Index of the bin updated by this sample.
+        """
+        current_bin = self.position_to_bin(position)
+        sample_force = self._potential_gradient_scalar(position)
+
+        n = self.number_of_copies[current_bin]
+
+        self.force_bias[current_bin] = (
+            n * self.force_bias[current_bin]
+            + sample_force
+        ) / (n + 1)
+
+        self.number_of_copies[current_bin] = n + 1
+
+        return current_bin
+    
+    def simulate_one_step(self) -> bool:
+        """
+        Perform one ABF integration step.
+
+        Returns
+        -------
+        bool
+            True when a transition is detected after the step.
+        """
+        last_position = self._last_position()
+        x = float(last_position.reshape(-1)[0])
+
+        if x < self.range[0] or x > self.range[1]:
+            raise ValueError(
+                "Position out of bounds. "
+                f"Received x={x}, expected a value inside {self.range}."
             )
 
-            step = (
-                step_size
-                * self.rng.standard_normal(self.dimension)
-            )
+        current_bin = self.position_to_bin(last_position)
+        physical_gradient = self._potential_gradient_scalar(
+            last_position
+        )
 
-            new_position = (
-                last_position
-                + step
-                + np.array([drift], dtype=float)
-            )
-
-            self.real_time += (
-                np.exp(
-                    self.bias_potential[current_bin] / self.D
+        drift = np.array(
+            [
+                (
+                    -physical_gradient
+                    + self.force_bias[current_bin]
                 )
                 * self.delta_t
-            )
-
-            self.positions.append(new_position)
-
-        self.td.positions = np.asarray(
-            self.positions[-self.num_steps:],
+            ],
             dtype=float,
         )
 
-    def simulate(self, max_iters=1e6):
-        while len(self.positions) < max_iters:
-            self.simulate_steps()
+        noise = (
+            np.sqrt(2.0 * self.D * self.delta_t)
+            * self.rng.standard_normal(self.dimension)
+        )
 
-            current_bin = self._current_bin()
-            n = self.number_of_copies[current_bin]
+        # The physical-time increment uses the bias applied during this step.
+        exponent = self.bias_potential[current_bin] / self.D
 
-            physical_force = self._physical_force_at(
-                self.positions[-1]
-            )
+        self.real_time += (
+            np.exp(exponent)
+            * self.delta_t
+        )
 
-            self.force_bias[current_bin] = (
-                n * self.force_bias[current_bin]
-                + physical_force
-            ) / (n + 1)
+        new_position = last_position + drift + noise
 
-            self.number_of_copies[current_bin] += 1
+        self.positions.append(
+            np.asarray(new_position, dtype=float)
+        )
 
-            self.free_energy()
+        # Each generated position contributes one force observation.
+        self._update_force_estimator(new_position)
 
-            escape_index = self.td.detect_transition()
+        # Reconstruct the profiles after every force observation.
+        self.free_energy()
+        self.update_bias_potential()
 
-            if escape_index is not None:
+        # Only the newly generated point needs to be checked here.
+        self.td.positions = np.asarray(
+            [new_position],
+            dtype=float,
+        )
+
+        return self.td.detect_transition() is not None
+
+    def simulate_steps(self, num_steps=None):
+        """
+        Perform a batch of integration steps.
+
+        Parameters
+        ----------
+        num_steps : int or None
+            Number of steps in the batch. When None, ``self.num_steps``
+            is used.
+
+        Returns
+        -------
+        int or None
+            Global trajectory index of the transition, or None.
+        """
+        steps = self.num_steps if num_steps is None else num_steps
+
+        if isinstance(steps, bool) or not isinstance(
+            steps,
+            (int, np.integer),
+        ):
+            raise TypeError("num_steps must be an integer.")
+
+        if steps <= 0:
+            raise ValueError("num_steps must be strictly positive.")
+
+        for _ in range(int(steps)):
+            transition_detected = self.simulate_one_step()
+
+            if transition_detected:
+                return len(self.positions) - 1
+
+        return None
+
+    def simulate(self, max_iters=1_000_000):
+        """
+        Run at most ``max_iters`` integration steps.
+
+        Notes
+        -----
+        ``max_iters`` is retained for compatibility, but it represents
+        integration steps, not batches.
+        """
+        if isinstance(max_iters, bool) or not isinstance(
+            max_iters,
+            (int, np.integer),
+        ):
+            raise TypeError("max_iters must be an integer.")
+
+        if max_iters <= 0:
+            raise ValueError("max_iters must be strictly positive.")
+
+        transition_index = None
+
+        for _ in range(int(max_iters)):
+            transition_detected = self.simulate_one_step()
+
+            if transition_detected:
+                transition_index = len(self.positions) - 1
                 break
 
-        return (
-            self.real_time,
-            (
-                escape_index * self.delta_t
-                if escape_index is not None
-                else None
-            ),
+        transition_time = (
+            transition_index * self.delta_t
+            if transition_index is not None
+            else None
         )
+
+        return self.real_time, transition_time
 
     def free_energy(self):
         # Calculate the free energy profile based on the force bias and number of copies

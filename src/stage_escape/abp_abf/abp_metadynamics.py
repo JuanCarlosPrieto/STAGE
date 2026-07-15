@@ -17,12 +17,7 @@ class ABPMetaDynamics:
         dimension=1,
         D=1.0,
         initial_position=None,
-        b=Potential(
-            1,
-            lambda x: 0,
-            lambda x: 0,
-            lambda x: 0,
-        ),
+        b=None,
         W=0.1,
         sigma=0.001,
         seed=None,
@@ -42,6 +37,20 @@ class ABPMetaDynamics:
             if initial_position is None
             else np.asarray(initial_position, dtype=float)
         )
+
+        if b is None:
+            b = Potential(
+                dimension=dimension,
+                function=lambda x: 0.0,
+                first_derivative=lambda x: np.zeros(
+                    dimension,
+                    dtype=float,
+                ),
+                second_derivative=lambda x: np.zeros(
+                    (dimension, dimension),
+                    dtype=float,
+                ),
+            )
 
         self.b = b
         self.centers = []
@@ -546,7 +555,7 @@ class ABPMetaDynamics:
 
         y_values = np.array([
             self.b.potential_at(np.array([x]))
-            + self.b_vias.potential_at(np.array([x]))
+            + self.bias_potential_at(np.array([x]))
             for x in x_values
         ])
 
@@ -594,7 +603,7 @@ class ABPMetaDynamics:
         x_values = np.linspace(x_range[0], x_range[1], num_points)
 
         y_values = np.array([
-            self.b_vias.potential_at(np.array([x]))
+            self.bias_potential_at(np.array([x]))
             for x in x_values
         ])
 
@@ -661,12 +670,12 @@ class ABPMetaDynamics:
                     Z[i, j] = self.b.potential_at(point)
 
                 elif potential_type == "biasing":
-                    Z[i, j] = self.b_vias.potential_at(point)
+                    Z[i, j] = self.bias_potential_at(point)
 
                 elif potential_type == "final":
                     Z[i, j] = (
                         self.b.potential_at(point)
-                        + self.b_vias.potential_at(point)
+                        + self.bias_potential_at(point)
                     )
 
                 else:
