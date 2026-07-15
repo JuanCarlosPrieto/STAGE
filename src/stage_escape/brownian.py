@@ -75,6 +75,9 @@ class BrownianMotion:
                 f"initial_position must have shape ({self.dimension},), "
                 f"got {initial_position.shape}."
             )
+        
+        if seed is not None and rng is not None:
+            raise ValueError("Provide either seed or rng, not both.")
 
         self.initial_position = initial_position.copy()
         self.positions = [self.initial_position.copy()]

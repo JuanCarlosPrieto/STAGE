@@ -57,6 +57,29 @@ class ABFRealTime:
 
     def _current_bin(self):
         return self.position_to_bin(self.positions[-1])
+    
+    def _physical_force_at(self, position):
+        """
+        Return the derivative of the physical potential as a scalar.
+
+        ABFRealTime is currently restricted to one dimension, while
+        Potential.potential_prime_at returns a gradient vector.
+        """
+        gradient = np.asarray(
+            self.b.potential_prime_at(
+                np.asarray(position, dtype=float)
+            ),
+            dtype=float,
+        ).reshape(-1)
+
+        if gradient.size != self.dimension:
+            raise ValueError(
+                "The potential gradient must have the same dimension "
+                f"as the simulation. Expected {self.dimension}, "
+                f"received {gradient.size}."
+            )
+
+        return float(gradient[0])
 
     def simulate_steps(self):
         for _ in range(1, self.num_steps):
@@ -64,40 +87,84 @@ class ABFRealTime:
             x = float(last_position.reshape(-1)[0])
 
             if x < self.range[0] or x > self.range[1]:
-                print(self.positions[-1])
-                raise ValueError("Position out of bounds. Please check the range and initial position.")
+                raise ValueError(
+                    f"Position {last_position} is outside the configured "
+                    f"range {self.range}."
+                )
 
             current_bin = self._current_bin()
-            drift = (
-                -self.b.potential_prime_at(last_position)
-                + self.force_bias[current_bin]
-            ) * self.delta_t  # Drift term based on the current position
-            step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
-            step = step_size * self.rng.standard_normal(self.dimension)  # Random step from normal distribution
-            new_position = self.positions[-1] + step + drift  # Add drift term
 
-            self.real_time += np.exp(
-                self.bias_potential[current_bin] / self.D
+            physical_force = self._physical_force_at(
+                last_position
+            )
+
+            drift = (
+                -physical_force
+                + self.force_bias[current_bin]
             ) * self.delta_t
+
+            step_size = np.sqrt(
+                2.0 * self.D * self.delta_t
+            )
+
+            step = (
+                step_size
+                * self.rng.standard_normal(self.dimension)
+            )
+
+            new_position = (
+                last_position
+                + step
+                + np.array([drift], dtype=float)
+            )
+
+            self.real_time += (
+                np.exp(
+                    self.bias_potential[current_bin] / self.D
+                )
+                * self.delta_t
+            )
+
             self.positions.append(new_position)
 
-        self.td.positions = np.array(self.positions[-self.num_steps:])
+        self.td.positions = np.asarray(
+            self.positions[-self.num_steps:],
+            dtype=float,
+        )
 
     def simulate(self, max_iters=1e6):
         while len(self.positions) < max_iters:
             self.simulate_steps()
-            current_bin = self._current_bin()
-            n = self.number_of_copies[current_bin]  # Number of copies for the current bin
-            self.force_bias[current_bin] *= n / (n + 1)  # Update the force bias based on the number of copies
-            self.force_bias[current_bin] += self.b.potential_prime_at(self.positions[-1]) / (n + 1)
-            self.number_of_copies[current_bin] += 1  # Increment the number of copies for the current bin
-            self.free_energy()  # Update the free energy profile after each step
 
-            if self.td.detect_transition() is not None:
+            current_bin = self._current_bin()
+            n = self.number_of_copies[current_bin]
+
+            physical_force = self._physical_force_at(
+                self.positions[-1]
+            )
+
+            self.force_bias[current_bin] = (
+                n * self.force_bias[current_bin]
+                + physical_force
+            ) / (n + 1)
+
+            self.number_of_copies[current_bin] += 1
+
+            self.free_energy()
+
+            escape_index = self.td.detect_transition()
+
+            if escape_index is not None:
                 break
 
-        escape_index = self.td.detect_transition()
-        return self.real_time, escape_index * self.delta_t if escape_index is not None else None
+        return (
+            self.real_time,
+            (
+                escape_index * self.delta_t
+                if escape_index is not None
+                else None
+            ),
+        )
 
     def free_energy(self):
         # Calculate the free energy profile based on the force bias and number of copies
