@@ -18,7 +18,8 @@ class ABPMetaDynamics:
         self.D = D  # Diffusion coefficient
         self.initial_position = initial_position if initial_position is not None else np.zeros(dimension)
         self.b = b  # Drift function
-        self.b_vias = Potential(dimension, lambda x: 0, lambda x: 0, lambda x: 0)  # Initialize the biasing potential as zero
+        
+        self.centers = []
         self.W = W  # Height of the Gaussian biasing potential
         self.sigma = sigma  # Width of the Gaussian biasing potential
         self.real_time = 0.0
@@ -29,17 +30,46 @@ class ABPMetaDynamics:
     
         self.positions = [initial_position]  # Start at the specified initial position
 
+    
+    def bias_potential_at(self, x):
+        """
+        Evaluate the biasing potential at a given position x.
+        """
+        total_bias = 0
+        for center in self.centers:
+            if np.abs(x - center).max() < 5 * self.sigma:  # Only compute if within 5 sigma of the center
+                total_bias += self.W * np.exp(-0.5 * np.sum((x - center) ** 2) / self.sigma ** 2)
+        return total_bias
+    
+
+    def bias_potential_prime_at(self, x):
+        """
+        Evaluate the derivative of the biasing potential at a given position x.
+        """
+        total_bias_prime = np.zeros_like(x)
+        for center in self.centers:
+            if np.abs(x - center).max() < 5 * self.sigma:  # Only compute if within 5 sigma of the center
+                diff = x - center
+                total_bias_prime += -self.W * (diff / self.sigma ** 2) * np.exp(-0.5 * np.sum(diff ** 2) / self.sigma ** 2)
+        return total_bias_prime
+
+
     def simulate_steps(self):
         rng = np.random.default_rng()  # Use the new random number generator
 
         for _ in range(1, self.num_steps):
-            drift = -(self.b.potential_prime_at(self.positions[-1]) + self.b_vias.potential_prime_at(self.positions[-1])) * self.delta_t  # Drift term based on the current position
+            drift = -(self.b.potential_prime_at(self.positions[-1]) + self.bias_potential_prime_at(self.positions[-1])) * self.delta_t  # Drift term based on the current position
             step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
             step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
-            new_position = self.positions[-1] + step + drift  # Add drift term
-            self.real_time += np.exp(self.b_vias.potential_at(new_position) / self.D) * self.delta_t  # Update the acceleration factor based on the biasing potential
+            new_position = self.positions[-1] + step + drift  # Add drift term           
+
+            self.real_time += np.exp(self.bias_potential_at(new_position) / self.D) * self.delta_t  # Update the acceleration factor based on the biasing potential
             self.positions.append(new_position)
-            self.weights.append(np.exp(self.b_vias.potential_at(new_position) / self.D))  # Store the weight for the new position
+            self.weights.append(np.exp(self.bias_potential_at(new_position) / self.D))  # Store the weight for the new position
+
+            self.td.positions = np.array([new_position])
+            if self.td.detect_transition() is not None:
+                break  # Stop simulation if a transition is detected
         
         self.td.positions = np.array(self.positions[-self.num_steps:])  # Update the transition detector with the new positions
 
@@ -47,14 +77,14 @@ class ABPMetaDynamics:
     def simulate(self, max_iters=1e6):
         for _ in range(int(max_iters)):
             self.simulate_steps()
-            self.b_vias.add_gaussian(self.positions[-1], self.W, self.sigma)
+            self.centers.append(self.positions[-1])  # Add the last position as a new center for the biasing potential
 
             if self.td.detect_transition() is not None:
                 break
         
-        self.td.positions = self.td.positions
+        self.td.positions = self.positions
         escape_index = self.td.detect_transition()
-        return self.real_time, escape_index * self.delta_t if escape_index is not None else None
+        return self.real_time, escape_index if escape_index is not None else None
 
 
     def plot_histogram_with_weights(

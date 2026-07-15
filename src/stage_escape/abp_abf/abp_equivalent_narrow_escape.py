@@ -23,8 +23,7 @@ class ABPEquivalentNarrowEscape:
             raise ValueError(f"Error checking if initial position is inside the surface: {e}, check the surface functions and the initial position.")
         
         if len(abp.positions) <= 1:
-            abp.num_steps = 10  # Default number of steps if not set
-            abp.simulate(max_iters=abp.num_steps + 1)  # Simulate the Brownian motion if not already done
+            abp.simulate(max_iters=abp.num_steps + 1)
         
 
     def check_escape(self, point):

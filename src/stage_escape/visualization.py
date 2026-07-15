@@ -340,23 +340,73 @@ def plot_histogram_density(
     title=None,
     label="Weighted histogram",
     xlabel="Position",
-    ylabel="Weighted density"
+    ylabel="Weighted density",
+    show_curve=True,
+    fill=True,
+    alpha=0.4,
 ):
     """
     Plot a precomputed histogram density.
+
+    Assumes all histogram bins have the same width.
     """
-    ax.plot(
-        bin_centers,
+    bin_centers = np.asarray(bin_centers, dtype=float)
+    density = np.asarray(density, dtype=float)
+
+    if bin_centers.ndim != 1 or density.ndim != 1:
+        raise ValueError("`bin_centers` and `density` must be one-dimensional.")
+
+    if len(bin_centers) != len(density):
+        raise ValueError(
+            "`bin_centers` and `density` must have the same length."
+        )
+
+    if len(bin_centers) < 2:
+        raise ValueError(
+            "At least two bin centers are needed to infer the bin width."
+        )
+
+    center_differences = np.diff(bin_centers)
+    bin_width = center_differences[0]
+
+    if bin_width <= 0:
+        raise ValueError("`bin_centers` must be strictly increasing.")
+
+    if not np.allclose(center_differences, bin_width):
+        raise ValueError(
+            "`bin_centers` are not equally spaced, so a single bin width "
+            "cannot be inferred."
+        )
+
+    bin_edges = np.concatenate(
+        (
+            [bin_centers[0] - bin_width / 2],
+            bin_centers + bin_width / 2,
+        )
+    )
+
+    ax.stairs(
         density,
-        marker="o",
-        linestyle="-",
+        bin_edges,
+        fill=fill,
+        alpha=alpha,
         label=label,
     )
 
+    if show_curve:
+        ax.plot(
+            bin_centers,
+            density,
+            marker="o",
+            linestyle="-",
+            label=f"{label} centers",
+        )
+
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_title(title if title is not None else "Weighted histogram")
+    ax.set_title(title or "Weighted histogram")
     ax.grid(True)
+    ax.legend()
 
     return ax
 
@@ -392,5 +442,106 @@ def plot_histogram_vs_distribution(
     ax.set_title(title if title is not None else "Histogram vs theoretical distribution")
     ax.grid(True)
     ax.legend()
+
+    return ax
+
+
+def plot_histogram_vs_theoretical_distribution(
+    simulation,
+    positions=None,
+    bins=40,
+    burn_in=0,
+):
+    """
+    Plot the empirical weighted histogram and the theoretical density
+
+        rho(x) = Z^(-1) exp(-V(x) / D).
+
+    Parameters
+    ----------
+    simulation
+        ABPMetaDynamics object.
+
+    positions : array-like, optional
+        Positions to use. By default, simulation.positions.
+
+    bins : int
+        Number of histogram bins.
+
+    burn_in : int
+        Number of initial positions to discard.
+    """
+
+    if positions is None:
+        positions = simulation.positions
+
+    # Convert (N, 1) or (N,) positions into a one-dimensional array
+    positions = np.asarray(positions, dtype=float).reshape(-1)
+    weights = np.asarray(simulation.weights, dtype=float).reshape(-1)
+
+    if len(positions) != len(weights):
+        raise ValueError(
+            "positions and weights must have the same length: "
+            f"{len(positions)} != {len(weights)}"
+        )
+
+    if burn_in < 0 or burn_in >= len(positions):
+        raise ValueError("burn_in must satisfy 0 <= burn_in < len(positions)")
+
+    positions = positions[burn_in:]
+    weights = weights[burn_in:]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # Actual histogram
+    _, bin_edges, _ = ax.hist(
+        positions,
+        bins=bins,
+        weights=weights,
+        density=True,
+        alpha=0.6,
+        edgecolor="black",
+        linewidth=0.8,
+        label="Weighted empirical distribution",
+    )
+
+    # Theoretical distribution on the same plotting interval
+    x_theory = np.linspace(bin_edges[0], bin_edges[-1], 1000)
+
+    potential_values = np.array([
+        simulation.b.potential_at(np.array([x]))
+        for x in x_theory
+    ])
+
+    # Subtracting the minimum does not change the normalized density
+    # and avoids numerical underflow/overflow.
+    theoretical_density = np.exp(
+        -(potential_values - potential_values.min()) / simulation.D
+    )
+
+    normalization = np.trapezoid(theoretical_density, x_theory)
+
+    if not np.isfinite(normalization) or normalization <= 0:
+        raise ValueError(
+            "The theoretical distribution could not be normalized."
+        )
+
+    theoretical_density /= normalization
+
+    ax.plot(
+        x_theory,
+        theoretical_density,
+        linewidth=2.5,
+        label=r"Theoretical: $Z^{-1}e^{-V(x)/D}$",
+    )
+
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Probability density")
+    ax.set_title("Empirical and theoretical distributions")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+
+    plt.show()
 
     return ax
