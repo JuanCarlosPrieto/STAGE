@@ -12,6 +12,28 @@ class EquivalentNarrowEscape:
         self.escapes = tuple(escapes)
 
         self._validate_initial_state()
+
+
+    def _validate_initial_state(self):
+        position = np.asarray(
+            self.brownian_motion.positions[0],
+            dtype=float,
+        )
+
+        if position.shape != (self.brownian_motion.dimension,):
+            raise ValueError(
+                "The initial position has an inconsistent dimension."
+            )
+
+        if not self.surface.is_inside(position):
+            raise ValueError(
+                "The initial position must be inside the domain."
+            )
+
+        if not self.escapes:
+            raise ValueError(
+                "At least one escape condition must be provided."
+            )
         
 
     def check_escape(self, point):
@@ -84,7 +106,11 @@ class EquivalentNarrowEscape:
                 # Particle got to one of the escapes
                 if self.check_escape(b):
                         del self.brownian_motion.positions[i + 2:]  # Remove all positions after the exit
-                        return self.escape_index(b), i * self.brownian_motion.delta_t  # Return the escape point if found and the corresponding time
+                        return {
+                            "escape_index": self.escape_index(b),
+                            "escape_point": np.asarray(b, dtype=float),
+                            "escape_time": (i + 1) * self.brownian_motion.delta_t,
+                        }
 
                 if self.surface.is_inside(b):
                     continue  # No escape, continue to the next step

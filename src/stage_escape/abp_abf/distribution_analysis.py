@@ -105,33 +105,67 @@ def weighted_histogram_density(values, weights=None, bins=30, value_range=None):
     return bin_centers, density, counts, bin_edges
 
 
-def theoretical_density_1d(
-    potential,
-    x_values,
-    diffusion,
-):
+def theoretical_density_1d(potential, x_values, D):
     x_values = np.asarray(x_values, dtype=float)
+
+    if D <= 0:
+        raise ValueError("D must be strictly positive.")
 
     energy = np.array(
         [
-            potential.potential_at(np.array([x]))
+            potential.potential_at(np.array([x], dtype=float))
             for x in x_values
         ],
         dtype=float,
     )
 
-    unnormalized = np.exp(
-        -(energy - np.min(energy)) / diffusion
-    )
+    unnormalized = np.exp(-(energy - energy.min()) / D)
+    normalization = np.trapezoid(unnormalized, x_values)
 
-    normalization = np.trapz(
-        unnormalized,
-        x_values,
-    )
-
-    if normalization <= 0:
-        raise ValueError(
-            "Theoretical density normalization is not positive."
-        )
+    if not np.isfinite(normalization) or normalization <= 0:
+        raise ValueError("The theoretical density cannot be normalized.")
 
     return unnormalized / normalization
+
+
+def theoretical_marginal_2d(
+    potential,
+    x_values,
+    y_values,
+    D,
+    axis=0,
+):
+    x_values = np.asarray(x_values, dtype=float)
+    y_values = np.asarray(y_values, dtype=float)
+
+    if D <= 0:
+        raise ValueError("D must be strictly positive.")
+
+    if axis not in (0, 1):
+        raise ValueError("axis must be 0 or 1.")
+
+    X, Y = np.meshgrid(x_values, y_values, indexing="xy")
+
+    energy = np.empty_like(X, dtype=float)
+
+    for row in range(X.shape[0]):
+        for col in range(X.shape[1]):
+            energy[row, col] = potential.potential_at(
+                np.array([X[row, col], Y[row, col]])
+            )
+
+    density = np.exp(-(energy - energy.min()) / D)
+
+    if axis == 0:
+        coordinate = x_values
+        marginal = np.trapezoid(density, y_values, axis=0)
+    else:
+        coordinate = y_values
+        marginal = np.trapezoid(density, x_values, axis=1)
+
+    normalization = np.trapezoid(marginal, coordinate)
+
+    if not np.isfinite(normalization) or normalization <= 0:
+        raise ValueError("The marginal density cannot be normalized.")
+
+    return coordinate, marginal / normalization

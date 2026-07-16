@@ -10,7 +10,28 @@ class NaiveNarrowEscape:
         self.escapes = tuple(escapes)
 
         self._validate_initial_state()
-        
+
+    def _validate_initial_state(self):
+        position = np.asarray(
+            self.brownian_motion.positions[0],
+            dtype=float,
+        )
+
+        if position.shape != (self.brownian_motion.dimension,):
+            raise ValueError(
+                "The initial position has an inconsistent dimension."
+            )
+
+        if not self.surface.is_inside(position):
+            raise ValueError(
+                "The initial position must be inside the domain."
+            )
+
+        if not self.escapes:
+            raise ValueError(
+                "At least one escape condition must be provided."
+            )
+            
 
     def check_escape(self, intersection_point):
         """

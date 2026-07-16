@@ -176,8 +176,7 @@ class ABFRealTime:
         self._update_force_estimator(new_position)
 
         # Reconstruct the profiles after every force observation.
-        self.free_energy()
-        self.update_bias_potential()
+        self.update_profiles()
 
         # Only the newly generated point needs to be checked here.
         self.td.positions = np.asarray(
@@ -255,38 +254,26 @@ class ABFRealTime:
         )
 
         return self.real_time, transition_time
-
-    def free_energy(self):
-        # Calculate the free energy profile based on the force bias and number of copies
-        free_energy = np.zeros(self.bins)
-        d_x = (self.range[1] - self.range[0]) / self.bins  # Width of each bin
-        free_energy[0] = -self.force_bias[0] * d_x
-        for bin_index in range(1, self.bins):
-            free_energy[bin_index] = free_energy[bin_index - 1] - self.force_bias[bin_index] * d_x
-
-        self.free_energy_profile = free_energy
-        return self.free_energy_profile
-
-    def update_bias_potential(self):
+    
+    def update_profiles(self):
         dx = (self.range[1] - self.range[0]) / self.bins
 
-        # A'(x) ≈ force_bias
-        A = np.zeros(self.bins)
-
-        # Integración trapezoidal más estable que rectángulos simples
-        A[1:] = np.cumsum(
-            0.5 * (self.force_bias[:-1] + self.force_bias[1:]) * dx
+        free_energy = np.zeros(self.bins)
+        free_energy[1:] = np.cumsum(
+            0.5
+            * (self.force_bias[:-1] + self.force_bias[1:])
+            * dx
         )
+        free_energy -= free_energy.min()
 
-        # Potencial de sesgo: V_bias = -A + C
-        V_bias = -A
+        bias_potential = -free_energy
+        bias_potential -= bias_potential.min()
 
-        # Gauge: hacer que el sesgo sea >= 0, como en ABP/metadynamics
-        # Esto importa para exp(V_bias / D)
-        V_bias -= np.min(V_bias)
+        self.free_energy_profile = free_energy
+        self.bias_potential = bias_potential
 
-        self.bias_potential = V_bias
-        return self.bias_potential
+        return free_energy, bias_potential
+
 
     def plot_free_energy(self):
         bin_centers = np.linspace(self.range[0], self.range[1], self.bins)  # Calculate bin centers for plotting
