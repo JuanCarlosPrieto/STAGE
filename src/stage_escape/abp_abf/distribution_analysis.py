@@ -3,6 +3,14 @@ from __future__ import annotations
 import numpy as np
 
 
+def _trapezoid(values, coordinates, *, axis=-1):
+    """Integrate with NumPy 1.x and 2.x without eager fallback lookup."""
+    implementation = getattr(np, "trapezoid", None)
+    if implementation is None:
+        implementation = np.trapz
+    return implementation(values, coordinates, axis=axis)
+
+
 def extract_coordinate(positions, axis: int = 0) -> np.ndarray:
     """Extract one coordinate from a trajectory as a one-dimensional array."""
     positions = np.asarray(positions, dtype=float)
@@ -39,7 +47,6 @@ def weighted_histogram_counts(
             raise ValueError("weights must have the same shape as values.")
         if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
             raise ValueError("weights must be finite and non-negative.")
-
     counts, bin_edges = np.histogram(
         values,
         bins=bins,
@@ -64,9 +71,8 @@ def normalize_histogram_counts(
     if not np.all(np.isfinite(counts)) or np.any(counts < 0.0):
         raise ValueError("counts must be finite and non-negative.")
     widths = np.diff(bin_edges)
-    if not np.all(widths > 0.0):
-        raise ValueError("bin_edges must be strictly increasing.")
-
+    if not np.all(np.isfinite(bin_edges)) or not np.all(widths > 0.0):
+        raise ValueError("bin_edges must be finite and strictly increasing.")
     total_mass = float(np.sum(counts))
     if total_mass <= 0.0:
         raise ValueError("Cannot normalize a histogram with zero mass.")
@@ -80,7 +86,7 @@ def weighted_histogram_density(
     weights=None,
     bins=30,
     value_range=None,
-):
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     counts, bin_edges = weighted_histogram_counts(
         values=values,
         weights=weights,
@@ -91,22 +97,25 @@ def weighted_histogram_density(
     return bin_centers, density, counts, bin_edges
 
 
-def theoretical_density_1d(potential, x_values, D):
+def theoretical_density_1d(potential, x_values, D) -> np.ndarray:
     x_values = np.asarray(x_values, dtype=float)
     if x_values.ndim != 1 or len(x_values) < 2:
         raise ValueError("x_values must be a one-dimensional grid.")
-    if not np.all(np.diff(x_values) > 0.0):
-        raise ValueError("x_values must be strictly increasing.")
+    if not np.all(np.isfinite(x_values)) or not np.all(np.diff(x_values) > 0.0):
+        raise ValueError("x_values must be finite and strictly increasing.")
     D = float(D)
     if not np.isfinite(D) or D <= 0.0:
         raise ValueError("D must be finite and strictly positive.")
-
+    if not callable(getattr(potential, "potential_at", None)):
+        raise TypeError("potential must provide potential_at(position).")
     energy = np.array(
         [potential.potential_at(np.array([x])) for x in x_values],
         dtype=float,
     )
+    if not np.all(np.isfinite(energy)):
+        raise ValueError("The potential returned non-finite energy values.")
     unnormalized = np.exp(-(energy - np.min(energy)) / D)
-    normalization = float(np.trapezoid(unnormalized, x_values))
+    normalization = float(_trapezoid(unnormalized, x_values))
     if not np.isfinite(normalization) or normalization <= 0.0:
         raise ValueError("The theoretical density cannot be normalized.")
     return unnormalized / normalization
@@ -118,13 +127,15 @@ def theoretical_marginal_2d(
     y_values,
     D,
     axis=0,
-):
+) -> tuple[np.ndarray, np.ndarray]:
     x_values = np.asarray(x_values, dtype=float)
     y_values = np.asarray(y_values, dtype=float)
     if x_values.ndim != 1 or y_values.ndim != 1:
         raise ValueError("x_values and y_values must be one-dimensional.")
     if len(x_values) < 2 or len(y_values) < 2:
         raise ValueError("Both coordinate grids require at least two points.")
+    if not np.all(np.isfinite(x_values)) or not np.all(np.isfinite(y_values)):
+        raise ValueError("Coordinate grids must contain finite values.")
     if not np.all(np.diff(x_values) > 0.0) or not np.all(
         np.diff(y_values) > 0.0
     ):
@@ -134,6 +145,8 @@ def theoretical_marginal_2d(
         raise ValueError("D must be finite and strictly positive.")
     if axis not in (0, 1):
         raise ValueError("axis must be 0 or 1.")
+    if not callable(getattr(potential, "potential_at", None)):
+        raise TypeError("potential must provide potential_at(position).")
 
     X, Y = np.meshgrid(x_values, y_values, indexing="xy")
     energy = np.empty_like(X, dtype=float)
@@ -142,16 +155,16 @@ def theoretical_marginal_2d(
             energy[row, column] = potential.potential_at(
                 np.array([X[row, column], Y[row, column]])
             )
+    if not np.all(np.isfinite(energy)):
+        raise ValueError("The potential returned non-finite energy values.")
     density = np.exp(-(energy - np.min(energy)) / D)
-
     if axis == 0:
         coordinate = x_values
-        marginal = np.trapezoid(density, y_values, axis=0)
+        marginal = _trapezoid(density, y_values, axis=0)
     else:
         coordinate = y_values
-        marginal = np.trapezoid(density, x_values, axis=1)
-
-    normalization = float(np.trapezoid(marginal, coordinate))
+        marginal = _trapezoid(density, x_values, axis=1)
+    normalization = float(_trapezoid(marginal, coordinate))
     if not np.isfinite(normalization) or normalization <= 0.0:
         raise ValueError("The marginal density cannot be normalized.")
     return coordinate.copy(), marginal / normalization

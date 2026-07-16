@@ -1,11 +1,23 @@
-# visualization.py
+from __future__ import annotations
 
 import numpy as np
-import matplotlib.pyplot as plt
 
-from matplotlib.collections import LineCollection
-from matplotlib.colors import LinearSegmentedColormap, Normalize
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+def _validate_stride(point_stride: int) -> int:
+    if isinstance(point_stride, bool) or not isinstance(
+        point_stride, (int, np.integer)
+    ):
+        raise TypeError("point_stride must be an integer.")
+    point_stride = int(point_stride)
+    if point_stride < 1:
+        raise ValueError("point_stride must be at least 1.")
+    return point_stride
+
+
+def _progress_colormap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("red_to_violet", ["red", "violet"])
 
 
 def add_colored_path_2d(
@@ -18,92 +30,69 @@ def add_colored_path_2d(
     linewidth=2.0,
     label="Brownian trajectory",
 ):
-    """
-    Add a 2D path to an existing matplotlib axis.
-    The path is colored from red to violet according to progression.
-    """
+    """Add a progression-colored 2D path to an existing axis."""
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import Normalize
 
     path = np.asarray(path, dtype=float)
-
     if path.ndim != 2 or path.shape[1] != 2:
         raise ValueError("path must have shape (N, 2).")
+    if len(path) < 2:
+        raise ValueError("path must contain at least two points.")
+    if not np.all(np.isfinite(path)):
+        raise ValueError("path must contain finite values.")
+    point_stride = _validate_stride(point_stride)
 
     n_steps = len(path)
-
-    if n_steps < 2:
-        raise ValueError("path must contain at least two points.")
-
-    cmap = LinearSegmentedColormap.from_list(
-        "red_to_violet",
-        ["red", "violet"]
-    )
-
-    norm_segments = Normalize(vmin=0, vmax=n_steps - 2)
-    segment_colors = cmap(norm_segments(np.arange(n_steps - 1)))
-
-    points = path[:, :2]
-    segments = np.stack([points[:-1], points[1:]], axis=1)
-
+    cmap = _progress_colormap()
+    norm_segments = Normalize(vmin=0, vmax=max(n_steps - 2, 1))
+    colors = cmap(norm_segments(np.arange(n_steps - 1)))
+    segments = np.stack([path[:-1], path[1:]], axis=1)
     line_collection = LineCollection(
         segments,
-        colors=segment_colors,
+        colors=colors,
         linewidths=linewidth,
         label=label,
     )
-
     ax.add_collection(line_collection)
 
     if show_points:
         point_indices = np.arange(0, n_steps, point_stride)
-
-        # Make sure the last point is included among the plotted points.
         if point_indices[-1] != n_steps - 1:
             point_indices = np.append(point_indices, n_steps - 1)
-
-        norm_points = Normalize(vmin=0, vmax=n_steps - 1)
-        point_colors = cmap(norm_points(point_indices))
-
+        point_norm = Normalize(vmin=0, vmax=max(n_steps - 1, 1))
         ax.scatter(
             path[point_indices, 0],
             path[point_indices, 1],
-            c=point_colors,
+            c=cmap(point_norm(point_indices)),
             s=point_size,
             alpha=point_alpha,
             edgecolors="none",
         )
-
     ax.scatter(path[0, 0], path[0, 1], color="red", s=60, label="Start")
     ax.scatter(path[-1, 0], path[-1, 1], color="violet", s=60, label="End")
-
     return line_collection, cmap, norm_segments
 
 
 def set_axes_equal_3d(ax, points):
-    """
-    Force equal scale on a 3D matplotlib plot.
-    """
+    """Force equal data scale on a 3D axis."""
     points = np.asarray(points, dtype=float)
-
-    x = points[:, 0]
-    y = points[:, 1]
-    z = points[:, 2]
-
-    x_middle = 0.5 * (x.max() + x.min())
-    y_middle = 0.5 * (y.max() + y.min())
-    z_middle = 0.5 * (z.max() + z.min())
-
-    radius = 0.5 * max(
-        x.max() - x.min(),
-        y.max() - y.min(),
-        z.max() - z.min(),
-    )
-
-    ax.set_xlim(x_middle - radius, x_middle + radius)
-    ax.set_ylim(y_middle - radius, y_middle + radius)
-    ax.set_zlim(z_middle - radius, z_middle + radius)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+        raise ValueError("points must have shape (N, 3).")
+    if not np.all(np.isfinite(points)):
+        raise ValueError("points must contain finite values.")
+    minima = points.min(axis=0)
+    maxima = points.max(axis=0)
+    middle = 0.5 * (minima + maxima)
+    radius = 0.5 * float(np.max(maxima - minima))
+    if radius == 0.0:
+        radius = 0.5
+    ax.set_xlim(middle[0] - radius, middle[0] + radius)
+    ax.set_ylim(middle[1] - radius, middle[1] + radius)
+    ax.set_zlim(middle[2] - radius, middle[2] + radius)
+    return ax
 
 
-@staticmethod
 def plot_brownian_path(
     path,
     title=None,
@@ -112,80 +101,52 @@ def plot_brownian_path(
     show_points=True,
     point_size=50,
     point_alpha=0.8,
-    point_stride=1
+    point_stride=1,
+    show=False,
 ):
+    """Plot a Brownian path and return ``(fig, ax)``.
+
+    The function no longer calls ``plt.show`` unless ``show=True``. This makes
+    it safe for scripts, tests and report-generation pipelines.
     """
-    Plot a Brownian trajectory in 1D, 2D or 3D.
-    
-    Parameters
-    ----------
-    path : array-like
-        Brownian path.
-        Shape can be:
-            (N,)      for 1D
-            (N, 1)    for 1D
-            (N, 2)    for 2D
-            (N, 3)    for 3D
-
-    title : str, optional
-        Figure title.
-
-    mode_1d : str
-        Only used for 1D paths.
-        "space"       -> plot the trajectory on a line, with no explicit time axis.
-        "time_series" -> plot X(t) versus step index.
-
-    savepath : str, optional
-        If provided, saves the figure to this path.
-    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import Normalize
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
     path = np.asarray(path, dtype=float)
-
     if path.ndim == 1:
         path = path.reshape(-1, 1)
-
     if path.ndim != 2:
         raise ValueError("path must have shape (N,), (N, 1), (N, 2), or (N, 3).")
-
-    n_steps, dim = path.shape
-
-    if dim not in [1, 2, 3]:
+    if not np.all(np.isfinite(path)):
+        raise ValueError("path must contain finite values.")
+    n_steps, dimension = path.shape
+    if dimension not in {1, 2, 3}:
         raise ValueError("Only 1D, 2D and 3D paths are supported.")
-
     if n_steps < 2:
         raise ValueError("The path must contain at least two points.")
+    point_stride = _validate_stride(point_stride)
 
-    cmap = LinearSegmentedColormap.from_list(
-        "red_to_violet",
-        ["red", "violet"]
-    )
-
-    norm = Normalize(vmin=0, vmax=n_steps - 2)
-    colors = cmap(norm(np.arange(n_steps - 1)))
-
+    cmap = _progress_colormap()
+    norm = Normalize(vmin=0, vmax=max(n_steps - 2, 1))
+    segment_colors = cmap(norm(np.arange(n_steps - 1)))
     point_indices = np.arange(0, n_steps, point_stride)
-    point_norm = Normalize(vmin=0, vmax=n_steps - 1)
+    if point_indices[-1] != n_steps - 1:
+        point_indices = np.append(point_indices, n_steps - 1)
+    point_norm = Normalize(vmin=0, vmax=max(n_steps - 1, 1))
     point_colors = cmap(point_norm(point_indices))
 
-    if dim == 1:
+    if dimension == 1:
         x = path[:, 0]
-
         if mode_1d == "space":
             fig, ax = plt.subplots(figsize=(8, 2.5))
-
             y = np.zeros_like(x)
-
             points = np.column_stack([x, y])
             segments = np.stack([points[:-1], points[1:]], axis=1)
-
-            line_collection = LineCollection(
-                segments,
-                colors=colors,
-                linewidths=2.5
+            ax.add_collection(
+                LineCollection(segments, colors=segment_colors, linewidths=2.5)
             )
-
-            ax.add_collection(line_collection)
-
             if show_points:
                 ax.scatter(
                     x[point_indices],
@@ -193,107 +154,67 @@ def plot_brownian_path(
                     c=point_colors,
                     s=point_size,
                     alpha=point_alpha,
-                    edgecolors="none"
+                    edgecolors="none",
                 )
-
             ax.scatter(x[0], 0, color="red", s=50, label="Start")
             ax.scatter(x[-1], 0, color="violet", s=50, label="End")
-
-            margin = 0.05 * (x.max() - x.min() + 1e-12)
+            spread = float(np.ptp(x))
+            margin = 0.05 * spread if spread > 0.0 else 0.5
             ax.set_xlim(x.min() - margin, x.max() + margin)
             ax.set_ylim(-0.1, 0.1)
-
             ax.set_xlabel("Position")
             ax.set_yticks([])
-            ax.set_ylabel("")
             ax.legend()
-
         elif mode_1d == "time_series":
             fig, ax = plt.subplots(figsize=(8, 4))
-
-            t = np.arange(n_steps)
-            points = np.column_stack([t, x])
+            time = np.arange(n_steps)
+            points = np.column_stack([time, x])
             segments = np.stack([points[:-1], points[1:]], axis=1)
-
-            line_collection = LineCollection(
-                segments,
-                colors=colors,
-                linewidths=2.5
+            ax.add_collection(
+                LineCollection(segments, colors=segment_colors, linewidths=2.5)
             )
-
-            ax.add_collection(line_collection)
-
             if show_points:
                 ax.scatter(
-                    t[point_indices],
+                    time[point_indices],
                     x[point_indices],
                     c=point_colors,
                     s=point_size,
                     alpha=point_alpha,
-                    edgecolors="none"
+                    edgecolors="none",
                 )
-
-            ax.scatter(t[0], x[0], color="red", s=50, label="Start")
-            ax.scatter(t[-1], x[-1], color="violet", s=50, label="End")
-
-            ax.set_xlim(t.min(), t.max())
-            ax.set_ylim(x.min(), x.max())
-
+            ax.scatter(time[0], x[0], color="red", s=50, label="Start")
+            ax.scatter(time[-1], x[-1], color="violet", s=50, label="End")
+            ax.set_xlim(time.min(), time.max())
+            spread = float(np.ptp(x))
+            margin = 0.05 * spread if spread > 0.0 else 0.5
+            ax.set_ylim(x.min() - margin, x.max() + margin)
             ax.set_xlabel("Step")
             ax.set_ylabel("X")
             ax.legend()
-
         else:
             raise ValueError("mode_1d must be 'space' or 'time_series'.")
-
-    elif dim == 2:
+    elif dimension == 2:
         fig, ax = plt.subplots(figsize=(6, 6))
-
-        points = path[:, :2]
-        segments = np.stack([points[:-1], points[1:]], axis=1)
-
-        line_collection = LineCollection(
-            segments,
-            colors=colors,
-            linewidths=2.0
+        add_colored_path_2d(
+            ax,
+            path,
+            point_stride=point_stride,
+            point_size=point_size,
+            point_alpha=point_alpha,
+            show_points=show_points,
         )
-
-        ax.add_collection(line_collection)
-
-        if show_points:
-            ax.scatter(
-                path[point_indices, 0],
-                path[point_indices, 1],
-                c=point_colors,
-                s=point_size,
-                alpha=point_alpha,
-                edgecolors="none"
-            )
-
-        ax.scatter(path[0, 0], path[0, 1], color="red", s=50, label="Start")
-        ax.scatter(path[-1, 0], path[-1, 1], color="violet", s=50, label="End")
-
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.axis("equal")
         ax.autoscale()
         ax.legend()
-
     else:
         fig = plt.figure(figsize=(7, 6))
         ax = fig.add_subplot(111, projection="3d")
-
-        points = path[:, :3]
-        segments = np.stack([points[:-1], points[1:]], axis=1)
-
-        line_collection = Line3DCollection(
-            segments,
-            colors=colors,
-            linewidths=2.0
+        segments = np.stack([path[:-1], path[1:]], axis=1)
+        ax.add_collection3d(
+            Line3DCollection(segments, colors=segment_colors, linewidths=2.0)
         )
-
-        ax.add_collection3d(line_collection)
-
         if show_points:
             ax.scatter(
                 path[point_indices, 0],
@@ -302,35 +223,80 @@ def plot_brownian_path(
                 c=point_colors,
                 s=point_size,
                 alpha=point_alpha,
-                edgecolors="none"
+                edgecolors="none",
             )
-
-        ax.scatter(path[0, 0], path[0, 1], path[0, 2], color="red", s=50, label="Start")
-        ax.scatter(path[-1, 0], path[-1, 1], path[-1, 2], color="violet", s=50, label="End")
-
+        ax.scatter(*path[0], color="red", s=50, label="Start")
+        ax.scatter(*path[-1], color="violet", s=50, label="End")
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
-
         set_axes_equal_3d(ax, path)
-
         ax.legend()
 
     if title is not None:
         ax.set_title(title)
-
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-
-    cbar = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.04)
-    cbar.set_label("Trajectory progression")
-
-    plt.tight_layout()
-
+    scalar_mappable = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    scalar_mappable.set_array([])
+    colorbar = fig.colorbar(scalar_mappable, ax=ax, fraction=0.03, pad=0.04)
+    colorbar.set_label("Trajectory progression")
+    fig.tight_layout()
     if savepath is not None:
-        plt.savefig(savepath, dpi=300, bbox_inches="tight")
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax
 
-    plt.show()
+
+def plot_narrow_escape_problem(
+    *,
+    path,
+    surface,
+    escapes,
+    escape_checker,
+    xlim,
+    ylim,
+    point_stride=1000,
+    point_size=50,
+    point_alpha=0.8,
+    show_points=True,
+    show=False,
+):
+    import matplotlib.pyplot as plt
+
+    path = np.asarray(path, dtype=float)
+    if path.ndim != 2 or path.shape[1] != 2:
+        raise ValueError("This plotting function requires a path of shape (N, 2).")
+    fig, ax = plt.subplots(figsize=(7, 7))
+    _, cmap, norm = add_colored_path_2d(
+        ax=ax,
+        path=path,
+        point_stride=point_stride,
+        point_size=point_size,
+        point_alpha=point_alpha,
+        show_points=show_points,
+    )
+    surface.plot_boundary_2d(
+        ax=ax,
+        xlim=xlim,
+        ylim=ylim,
+        escape_checker=escape_checker,
+    )
+    if escape_checker is None:
+        for escape in escapes:
+            escape.plot_escape(ax=ax, xlim=xlim, ylim=ylim)
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.axis("equal")
+    ax.autoscale()
+    ax.legend()
+    scalar_mappable = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    scalar_mappable.set_array([])
+    colorbar = fig.colorbar(scalar_mappable, ax=ax, fraction=0.03, pad=0.04)
+    colorbar.set_label("Trajectory progression")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, ax
 
 
 def plot_histogram_density(
@@ -345,54 +311,23 @@ def plot_histogram_density(
     fill=True,
     alpha=0.4,
 ):
-    """
-    Plot a precomputed histogram density.
-
-    Assumes all histogram bins have the same width.
-    """
+    """Plot a density whose equally spaced bin centers are already known."""
     bin_centers = np.asarray(bin_centers, dtype=float)
     density = np.asarray(density, dtype=float)
-
     if bin_centers.ndim != 1 or density.ndim != 1:
-        raise ValueError("`bin_centers` and `density` must be one-dimensional.")
-
+        raise ValueError("bin_centers and density must be one-dimensional.")
     if len(bin_centers) != len(density):
-        raise ValueError(
-            "`bin_centers` and `density` must have the same length."
-        )
-
+        raise ValueError("bin_centers and density must have the same length.")
     if len(bin_centers) < 2:
-        raise ValueError(
-            "At least two bin centers are needed to infer the bin width."
-        )
-
-    center_differences = np.diff(bin_centers)
-    bin_width = center_differences[0]
-
-    if bin_width <= 0:
-        raise ValueError("`bin_centers` must be strictly increasing.")
-
-    if not np.allclose(center_differences, bin_width):
-        raise ValueError(
-            "`bin_centers` are not equally spaced, so a single bin width "
-            "cannot be inferred."
-        )
-
-    bin_edges = np.concatenate(
-        (
-            [bin_centers[0] - bin_width / 2],
-            bin_centers + bin_width / 2,
-        )
+        raise ValueError("At least two bin centers are required.")
+    differences = np.diff(bin_centers)
+    width = differences[0]
+    if width <= 0.0 or not np.allclose(differences, width):
+        raise ValueError("bin_centers must be equally spaced and increasing.")
+    edges = np.concatenate(
+        ([bin_centers[0] - width / 2.0], bin_centers + width / 2.0)
     )
-
-    ax.stairs(
-        density,
-        bin_edges,
-        fill=fill,
-        alpha=alpha,
-        label=label,
-    )
-
+    ax.stairs(density, edges, fill=fill, alpha=alpha, label=label)
     if show_curve:
         ax.plot(
             bin_centers,
@@ -401,13 +336,11 @@ def plot_histogram_density(
             linestyle="-",
             label=f"{label} centers",
         )
-
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title or "Weighted histogram")
     ax.grid(True)
     ax.legend()
-
     return ax
 
 
@@ -419,9 +352,6 @@ def plot_histogram_vs_distribution(
     theoretical_density,
     title=None,
 ):
-    """
-    Plot a weighted histogram against a theoretical distribution.
-    """
     ax.plot(
         bin_centers,
         histogram_density,
@@ -429,119 +359,10 @@ def plot_histogram_vs_distribution(
         linestyle="-",
         label="Weighted histogram",
     )
-
-    ax.plot(
-        x_theory,
-        theoretical_density,
-        linewidth=2.0,
-        label="Theoretical distribution",
-    )
-
+    ax.plot(x_theory, theoretical_density, linewidth=2.0, label="Theory")
     ax.set_xlabel("Position")
     ax.set_ylabel("Density")
-    ax.set_title(title if title is not None else "Histogram vs theoretical distribution")
+    ax.set_title(title or "Histogram vs theoretical distribution")
     ax.grid(True)
     ax.legend()
-
-    return ax
-
-
-def plot_histogram_vs_theoretical_distribution(
-    simulation,
-    positions=None,
-    bins=40,
-    burn_in=0,
-):
-    """
-    Plot the empirical weighted histogram and the theoretical density
-
-        rho(x) = Z^(-1) exp(-V(x) / D).
-
-    Parameters
-    ----------
-    simulation
-        ABPMetaDynamics object.
-
-    positions : array-like, optional
-        Positions to use. By default, simulation.positions.
-
-    bins : int
-        Number of histogram bins.
-
-    burn_in : int
-        Number of initial positions to discard.
-    """
-
-    if positions is None:
-        positions = simulation.positions
-
-    # Convert (N, 1) or (N,) positions into a one-dimensional array
-    positions = np.asarray(positions, dtype=float).reshape(-1)
-    weights = np.asarray(simulation.weights, dtype=float).reshape(-1)
-
-    if len(positions) != len(weights):
-        raise ValueError(
-            "positions and weights must have the same length: "
-            f"{len(positions)} != {len(weights)}"
-        )
-
-    if burn_in < 0 or burn_in >= len(positions):
-        raise ValueError("burn_in must satisfy 0 <= burn_in < len(positions)")
-
-    positions = positions[burn_in:]
-    weights = weights[burn_in:]
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    # Actual histogram
-    _, bin_edges, _ = ax.hist(
-        positions,
-        bins=bins,
-        weights=weights,
-        density=True,
-        alpha=0.6,
-        edgecolor="black",
-        linewidth=0.8,
-        label="Weighted empirical distribution",
-    )
-
-    # Theoretical distribution on the same plotting interval
-    x_theory = np.linspace(bin_edges[0], bin_edges[-1], 1000)
-
-    potential_values = np.array([
-        simulation.b.potential_at(np.array([x]))
-        for x in x_theory
-    ])
-
-    # Subtracting the minimum does not change the normalized density
-    # and avoids numerical underflow/overflow.
-    theoretical_density = np.exp(
-        -(potential_values - potential_values.min()) / simulation.D
-    )
-
-    normalization = np.trapezoid(theoretical_density, x_theory)
-
-    if not np.isfinite(normalization) or normalization <= 0:
-        raise ValueError(
-            "The theoretical distribution could not be normalized."
-        )
-
-    theoretical_density /= normalization
-
-    ax.plot(
-        x_theory,
-        theoretical_density,
-        linewidth=2.5,
-        label=r"Theoretical: $Z^{-1}e^{-V(x)/D}$",
-    )
-
-    ax.set_xlabel("Position")
-    ax.set_ylabel("Probability density")
-    ax.set_title("Empirical and theoretical distributions")
-    ax.grid(axis="y", alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-
-    plt.show()
-
     return ax
