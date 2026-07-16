@@ -1,30 +1,34 @@
+import numpy as np
 from scipy.optimize import brentq
 
 
 def find_intersection(phi, a, b):
-    '''
-    Find the intersection of a line going from a to b with the curve defined by the function phi.
+    """Return the intersection point and its relative position on [a, b]."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
 
-    Parameters
-    ----------
-    phi : callable
-        A function that takes a point and returns a scalar value
-    a : array-like
-        The starting point of the line segment
-    b : array-like
-        The ending point of the line segment
-    '''
+    if a.shape != b.shape:
+        raise ValueError("a and b must have the same shape.")
 
-    if phi(a) * phi(b) > 0:
-        raise ValueError("The function must have opposite signs at the endpoints a and b.")
+    phi_a = float(phi(a))
+    phi_b = float(phi(b))
 
-    def f(t):
-        return phi(a + t * (b - a))
+    if phi_a == 0.0:
+        return a.copy(), 0.0
 
-    try:
-        t_intersection = brentq(f, 0, 1)
-        intersection_point = a + t_intersection * (b - a)
-        return intersection_point
-    
-    except ValueError:
-        return None
+    if phi_b == 0.0:
+        return b.copy(), 1.0
+
+    if phi_a * phi_b > 0:
+        raise ValueError(
+            "The segment endpoints do not bracket a boundary intersection."
+        )
+
+    def segment_function(t):
+        point = a + t * (b - a)
+        return float(phi(point))
+
+    theta = brentq(segment_function, 0.0, 1.0)
+    intersection_point = a + theta * (b - a)
+
+    return intersection_point, theta

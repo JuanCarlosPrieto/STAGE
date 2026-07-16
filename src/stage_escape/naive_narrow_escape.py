@@ -7,22 +7,31 @@ class NaiveNarrowEscape:
     def __init__(self, brownian_motion, surface, escapes):
         self.brownian_motion = brownian_motion
         self.surface = surface
-        self.escapes = escapes
+        self.escapes = tuple(escapes)
 
-        if brownian_motion.positions[0] is None:
-            raise ValueError("Initial position of Brownian motion cannot be None.")
-        
-        try:
-            if not surface.is_inside(brownian_motion.positions[0]):
-                raise ValueError("Initial position of Brownian motion must be inside the surface.")
-        
-        except Exception as e:
-            raise ValueError(f"Error checking if initial position is inside the surface: {e}, check the surface functions and the initial position.")
-        
-        if len(brownian_motion.positions) <= 1:
-            brownian_motion.num_steps = 1000  # Default number of steps if not set
-            brownian_motion.simulate()  # Simulate the Brownian motion if not already done
-        
+        self._validate_initial_state()
+
+    def _validate_initial_state(self):
+        position = np.asarray(
+            self.brownian_motion.positions[0],
+            dtype=float,
+        )
+
+        if position.shape != (self.brownian_motion.dimension,):
+            raise ValueError(
+                "The initial position has an inconsistent dimension."
+            )
+
+        if not self.surface.is_inside(position):
+            raise ValueError(
+                "The initial position must be inside the domain."
+            )
+
+        if not self.escapes:
+            raise ValueError(
+                "At least one escape condition must be provided."
+            )
+            
 
     def check_escape(self, intersection_point):
         """
@@ -62,7 +71,7 @@ class NaiveNarrowEscape:
             time at which the escape occurs, or None if no escape occurs.
         """
         curr = 0  # Start checking from the first position
-        while len(self.brownian_motion.positions) <= max_steps + self.brownian_motion.num_steps:
+        while len(self.brownian_motion.positions) <= max_steps + self.brownian_motion.deposition_stride:
             for i in range(curr, len(self.brownian_motion.positions) - 1):            
                 a = self.brownian_motion.positions[i]
                 b = self.brownian_motion.positions[i + 1]
@@ -71,12 +80,12 @@ class NaiveNarrowEscape:
                     continue  # No escape, continue to the next step
 
                 index = self.surface.exit_surface(b)
-                intersection_point = find_intersection(self.surface.functions[index], a, b)
+                intersection_point, theta = find_intersection(self.surface.functions[index], a, b)
                 
                 if intersection_point is not None:
                     if self.check_escape(intersection_point):
                         del self.brownian_motion.positions[i + 2:]  # Remove all positions after the exit
-                        return intersection_point, i * self.brownian_motion.delta_t  # Return the escape point if found and the corresponding time
+                        return intersection_point, (i + theta) * self.brownian_motion.delta_t  # Return the escape point if found and the corresponding time
                     else:
                         del self.brownian_motion.positions[i + 1:]  # Remove all positions after the exit (no more valid)
                         self.brownian_motion.positions.append(self.brownian_motion.positions[-1]) # Append the last valid position (Metroplis algorithm)

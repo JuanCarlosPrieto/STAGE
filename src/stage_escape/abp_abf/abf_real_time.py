@@ -1,113 +1,258 @@
+from __future__ import annotations
+
+from typing import Literal
+
 import numpy as np
-import matplotlib.pyplot as plt
+
+from ._validation import (
+    as_position,
+    prepare_rng,
+    validate_positive_float,
+    validate_positive_int,
+    validate_transition_detector,
+)
+from .abf_profiles import reconstruct_abf_profiles
+from .potential import Potential
+from .results import ABFResult, TerminationReason
+from .transition_detector import TransitionDetector
+
+
+OutOfRangePolicy = Literal["raise", "clip"]
+
 
 class ABFRealTime:
-    def __init__(self, num_steps, td, delta_t, D=1.0, initial_position=None, b=lambda x: 0, bins=100, range=(-3, 3)):
-        self.num_steps = num_steps
-        self.td = td
-        self.delta_t = delta_t
-        self.bias_potential = np.zeros(bins)
-        self.dimension = 1  # Dimension of the Brownian motion
-        self.D = D  # Diffusion coefficient
-        self.initial_position = initial_position if initial_position is not None else np.zeros(self.dimension)
-        self.b = b  # Drift function
-        self.force_bias = np.zeros(bins)  # Initialize force bias for each dimension and bin
-        self.number_of_copies = np.zeros(bins)  # Initialize number of copies for each dimension and bin
-        self.bins = bins  # Number of bins for the biasing potential
-        self.range = range  # Range for the biasing potential
-        self.free_energy_profile = np.zeros(bins)  # Initialize free energy profile
+    """One-dimensional adaptive biasing force simulation.
+
+    ``force_bias`` stores the running estimate of the physical potential
+    derivative in each bin. The applied bias force is therefore
+    ``+force_bias`` in the overdamped drift, cancelling ``-V'`` as sampling
+    converges.
+    """
+
+    def __init__(
+        self,
+        transition_detector,
+        delta_t,
+        D=1.0,
+        initial_position=None,
+        b=None,
+        bins=100,
+        value_range=(-3.0, 3.0),
+        seed=None,
+        rng=None,
+        profile_update_stride=1,
+        out_of_range: OutOfRangePolicy = "raise",
+    ) -> None:
+        self.delta_t = validate_positive_float("delta_t", delta_t)
+        self.dimension = 1
+        self.D = validate_positive_float("D", D)
+        self.bins = validate_positive_int("bins", bins, minimum=2)
+        self.profile_update_stride = validate_positive_int(
+            "profile_update_stride", profile_update_stride
+        )
+        if out_of_range not in {"raise", "clip"}:
+            raise ValueError("out_of_range must be either 'raise' or 'clip'.")
+        self.out_of_range: OutOfRangePolicy = out_of_range
+
+        try:
+            lower, upper = value_range
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "value_range must contain exactly two values."
+            ) from error
+        lower = float(lower)
+        upper = float(upper)
+        if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+            raise ValueError("value_range must contain finite increasing bounds.")
+        self.value_range = (lower, upper)
+
+        validate_transition_detector(transition_detector)
+        self.transition_detector: TransitionDetector | None = transition_detector
+        self.seed = seed
+        self.rng, self._external_rng = prepare_rng(seed=seed, rng=rng)
+        self.initial_position = as_position(
+            np.zeros(1) if initial_position is None else initial_position,
+            1,
+            name="initial_position",
+        )
+        self._range_adjusted_position(self.initial_position)
+
+        self.b = Potential.zero(1) if b is None else b
+        if not callable(getattr(self.b, "potential_prime_at", None)):
+            raise TypeError("b must provide potential_prime_at(position).")
+        if getattr(self.b, "dimension", 1) != 1:
+            raise ValueError("ABFRealTime requires a one-dimensional potential.")
+
+        self.reset(reset_rng=False)
+
+    def reset(self, *, reset_rng: bool = True) -> None:
+        if reset_rng and not self._external_rng:
+            self.rng = np.random.default_rng(self.seed)
+        self.positions = [self.initial_position.copy()]
+        self.force_bias = np.zeros(self.bins, dtype=float)
+        self.number_of_copies = np.zeros(self.bins, dtype=np.int64)
+        self.bin_edges = np.linspace(
+            self.value_range[0], self.value_range[1], self.bins + 1
+        )
+        self.free_energy_profile = np.zeros(self.bins, dtype=float)
+        self.bias_potential = np.zeros(self.bins, dtype=float)
         self.real_time = 0.0
+        self.steps_completed = 0
+        self.transition_index: int | None = None
+        self.termination_reason: TerminationReason | None = None
 
-        if initial_position is None:
-            initial_position = np.zeros(self.dimension)  # Default initial position is the origin
+    def _last_position(self) -> np.ndarray:
+        return np.asarray(self.positions[-1], dtype=float)
 
-        self.positions = [initial_position]  # Start at the specified initial position
-
-    
-    def position_to_bin(self, position):
-        x = float(np.asarray(position).reshape(-1)[0])
-        bin_index = int((x - self.range[0]) / (self.range[1] - self.range[0]) * self.bins)
-        return np.clip(bin_index, 0, self.bins - 1)
-
-
-    def simulate_steps(self):
-        rng = np.random.default_rng()  # Use the new random number generator
-
-        for _ in range(1, self.num_steps):
-            x = float(np.asarray(self.positions[-1]).reshape(-1)[0])
-
-            if x < self.range[0] or x > self.range[1]:
-                print(self.positions[-1])
-                raise ValueError("Position out of bounds. Please check the range and initial position.")
-            
-            drift = (-self.b.potential_prime_at(self.positions[-1]) + self.force_bias[self.position_to_bin(self.positions[-1])]) * self.delta_t  # Drift term based on the current position
-            step_size = np.sqrt(2 * self.D * self.delta_t)  # Step size based on diffusion coefficient and time step
-            step = step_size * rng.standard_normal(self.dimension)  # Random step from normal distribution
-            new_position = self.positions[-1] + step + drift  # Add drift term
-            bin_index = self.position_to_bin(self.positions[-1])
-
-            self.real_time += np.exp(
-                self.bias_potential[bin_index] / self.D
-            ) * self.delta_t
-            self.positions.append(new_position)
-        
-        self.td.positions = np.array(self.positions[-self.num_steps:])
-    
-
-    def simulate(self, max_iters=1e6):
-        while len(self.positions) < max_iters:
-            self.simulate_steps()
-            n = self.number_of_copies[self.position_to_bin(self.positions[-1])]  # Number of copies for the current bin
-            self.force_bias[self.position_to_bin(self.positions[-1])] *= n / (n + 1)  # Update the force bias based on the number of copies
-            self.force_bias[self.position_to_bin(self.positions[-1])] += self.b.potential_prime_at(self.positions[-1]) / (n + 1)
-            self.number_of_copies[self.position_to_bin(self.positions[-1])] += 1  # Increment the number of copies for the current bin
-            self.free_energy()  # Update the free energy profile after each step
-
-            if self.td.detect_transition() is not None:
-                break
-        
-        escape_index = self.td.detect_transition()
-        return self.real_time, escape_index * self.delta_t if escape_index is not None else None
-
-    
-    def free_energy(self):
-        # Calculate the free energy profile based on the force bias and number of copies
-        free_energy = np.zeros(self.bins)
-        d_x = (self.range[1] - self.range[0]) / self.bins  # Width of each bin
-        free_energy[0] = -self.force_bias[0] * d_x
-        for bin_index in range(1, self.bins):
-            free_energy[bin_index] = free_energy[bin_index - 1] - self.force_bias[bin_index] * d_x
-        
-        self.free_energy_profile = free_energy
-        return self.free_energy_profile
-
-    def update_bias_potential(self):
-        dx = (self.range[1] - self.range[0]) / self.bins
-
-        # A'(x) ≈ force_bias
-        A = np.zeros(self.bins)
-
-        # Integración trapezoidal más estable que rectángulos simples
-        A[1:] = np.cumsum(
-            0.5 * (self.force_bias[:-1] + self.force_bias[1:]) * dx
+    def _range_adjusted_position(self, position) -> float:
+        x = float(as_position(position, 1)[0])
+        lower, upper = self.value_range
+        if lower <= x <= upper:
+            return x
+        if self.out_of_range == "clip":
+            return float(np.clip(x, lower, upper))
+        raise ValueError(
+            f"ABF position x={x} lies outside value_range={self.value_range}."
         )
 
-        # Potencial de sesgo: V_bias = -A + C
-        V_bias = -A
+    def position_to_bin(self, position) -> int:
+        x = self._range_adjusted_position(position)
+        lower, upper = self.value_range
+        normalized = (x - lower) / (upper - lower)
+        return int(np.clip(int(normalized * self.bins), 0, self.bins - 1))
 
-        # Gauge: hacer que el sesgo sea >= 0, como en ABP/metadynamics
-        # Esto importa para exp(V_bias / D)
-        V_bias -= np.min(V_bias)
+    def _current_bin(self) -> int:
+        return self.position_to_bin(self._last_position())
 
-        self.bias_potential = V_bias
-        return self.bias_potential
+    def _potential_gradient_scalar(self, position) -> float:
+        gradient = np.asarray(
+            self.b.potential_prime_at(position), dtype=float
+        ).reshape(-1)
+        if gradient.size != 1:
+            raise ValueError("ABFRealTime requires a scalar potential gradient.")
+        value = float(gradient[0])
+        if not np.isfinite(value):
+            raise FloatingPointError("The physical gradient is not finite.")
+        return value
 
+    def _update_force_estimator(self, position) -> int:
+        current_bin = self.position_to_bin(position)
+        sample = self._potential_gradient_scalar(position)
+        count = int(self.number_of_copies[current_bin])
+        self.force_bias[current_bin] += (
+            sample - self.force_bias[current_bin]
+        ) / (count + 1)
+        self.number_of_copies[current_bin] = count + 1
+        return current_bin
 
-    def plot_free_energy(self):
-        bin_centers = np.linspace(self.range[0], self.range[1], self.bins)  # Calculate bin centers for plotting
-        plt.plot(bin_centers, self.free_energy_profile)  # Plot the free energy profile
-        plt.xlabel('Position')  # Label for x-axis
-        plt.ylabel('Free Energy')  # Label for y-axis
-        plt.title('Free Energy Profile')  # Title of the plot
-        plt.grid()  # Add grid to the plot
-        plt.show()  # Display the plot
+    def _transition_detected_at(self, position) -> bool:
+        return (
+            self.transition_detector is not None
+            and self.transition_detector.is_transition(position)
+        )
+
+    def update_profiles(self):
+        (
+            self.bin_edges,
+            self.free_energy_profile,
+            self.bias_potential,
+        ) = reconstruct_abf_profiles(
+            force_bias=self.force_bias,
+            value_range=self.value_range,
+        )
+        return self.free_energy_profile, self.bias_potential
+
+    def step(self) -> bool:
+        """Advance the ABF dynamics by exactly one integration step."""
+        if self.transition_index is not None:
+            return True
+
+        current_position = self._last_position()
+        current_bin = self._current_bin()
+        physical_gradient = self._potential_gradient_scalar(current_position)
+        applied_bias = float(self.bias_potential[current_bin])
+
+        drift = np.array(
+            [(-physical_gradient + self.force_bias[current_bin]) * self.delta_t],
+            dtype=float,
+        )
+        noise = (
+            np.sqrt(2.0 * self.D * self.delta_t)
+            * self.rng.standard_normal(1)
+        )
+        new_position = current_position + drift + noise
+        if not np.all(np.isfinite(new_position)):
+            raise FloatingPointError("The new ABF position is not finite.")
+        # Validate before mutating the trajectory. In clip mode only the bin
+        # lookup is clipped; the physical trajectory remains unchanged.
+        self._range_adjusted_position(new_position)
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            time_weight = float(np.exp(applied_bias / self.D))
+        if not np.isfinite(time_weight) or time_weight <= 0.0:
+            raise FloatingPointError("The ABF reweighting factor is invalid.")
+
+        self.positions.append(new_position.copy())
+        self.real_time += time_weight * self.delta_t
+        self.steps_completed += 1
+        self._update_force_estimator(new_position)
+
+        if self.steps_completed % self.profile_update_stride == 0:
+            self.update_profiles()
+
+        if self._transition_detected_at(new_position):
+            self.transition_index = len(self.positions) - 1
+            self.termination_reason = "transition"
+            return True
+        return False
+
+    def result(
+        self,
+        termination_reason: TerminationReason | None = None,
+    ) -> ABFResult:
+        if termination_reason is None:
+            termination_reason = (
+                "transition" if self.transition_index is not None else "max_steps"
+            )
+        self.update_profiles()
+
+        return ABFResult(
+            method="abf",
+            positions=np.asarray(self.positions, dtype=float).reshape(-1, 1),
+            delta_t=self.delta_t,
+            diffusion=self.D,
+            seed=self.seed,
+            transition_index=self.transition_index,
+            physical_time=float(self.real_time),
+            termination_reason=termination_reason,
+            force_bias=self.force_bias.copy(),
+            visit_counts=self.number_of_copies.copy(),
+            bin_edges=self.bin_edges.copy(),
+            free_energy=self.free_energy_profile.copy(),
+            bias_potential=self.bias_potential.copy(),
+            metadata={
+                "dimension": 1,
+                "bins": self.bins,
+                "value_range": tuple(self.value_range),
+                "profile_update_stride": self.profile_update_stride,
+                "out_of_range": self.out_of_range,
+            },
+        )
+
+    def run(self, max_steps=1_000_000, *, reset: bool = False) -> ABFResult:
+        max_steps = validate_positive_int("max_steps", max_steps)
+        if reset:
+            self.reset()
+
+        if self._transition_detected_at(self._last_position()):
+            self.transition_index = len(self.positions) - 1
+            self.termination_reason = "transition"
+            return self.result("transition")
+
+        for _ in range(max_steps):
+            if self.step():
+                return self.result("transition")
+
+        self.termination_reason = "max_steps"
+        return self.result("max_steps")
+
