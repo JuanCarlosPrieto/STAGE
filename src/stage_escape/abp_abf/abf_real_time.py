@@ -1,17 +1,24 @@
+from __future__ import annotations
+
 import numpy as np
+
+from .potential import Potential
+from .results import ABFResult, TerminationReason
+from .transition_detector import TransitionDetector
 
 
 class ABFRealTime:
+    """One-dimensional adaptive biasing force simulation."""
+
     def __init__(
         self,
-        deposition_stride,
-        td,
+        transition_detector,
         delta_t,
         D=1.0,
         initial_position=None,
-        b=lambda x: 0,
+        b=None,
         bins=100,
-        value_range=(-3, 3),
+        value_range=(-3.0, 3.0),
         seed=None,
         rng=None,
         profile_update_stride=100,
@@ -19,21 +26,22 @@ class ABFRealTime:
         if seed is not None and rng is not None:
             raise ValueError("Provide either seed or rng, not both.")
 
-        self.deposition_stride = deposition_stride
-        self.td = td
-        self.delta_t = delta_t
-        self.bias_potential = np.zeros(bins)
-        self.dimension = 1  # Dimension of the Brownian motion
-        self.D = D  # Diffusion coefficient
-        self.initial_position = initial_position if initial_position is not None else np.zeros(self.dimension)
-        self.b = b  # Drift function
-        self.force_bias = np.zeros(bins)  # Initialize force bias for each dimension and bin
-        self.number_of_copies = np.zeros(bins)  # Initialize number of copies for each dimension and bin
-        self.bins = bins  # Number of bins for the biasing potential
-        self.value_range = value_range  # Range for the biasing potential
-        self.free_energy_profile = np.zeros(bins)  # Initialize free energy profile
-        self.real_time = 0.0
-        
+        delta_t = float(delta_t)
+        D = float(D)
+
+        if not np.isfinite(delta_t) or delta_t <= 0.0:
+            raise ValueError("delta_t must be finite and strictly positive.")
+        if not np.isfinite(D) or D <= 0.0:
+            raise ValueError("D must be finite and strictly positive.")
+
+        if (
+            isinstance(bins, bool)
+            or not isinstance(bins, (int, np.integer))
+        ):
+            raise TypeError("bins must be an integer.")
+        if bins < 2:
+            raise ValueError("bins must be greater than or equal to 2.")
+
         if (
             isinstance(profile_update_stride, bool)
             or not isinstance(
@@ -44,46 +52,147 @@ class ABFRealTime:
             raise TypeError(
                 "profile_update_stride must be an integer."
             )
-
         if profile_update_stride <= 0:
             raise ValueError(
                 "profile_update_stride must be strictly positive."
             )
 
-        self.profile_update_stride = profile_update_stride
-        self.steps_completed = 0
-        self.transition_index = None
+        try:
+            lower, upper = value_range
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "value_range must contain exactly two values."
+            ) from error
+
+        lower = float(lower)
+        upper = float(upper)
+
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            raise ValueError("value_range bounds must be finite.")
+        if upper <= lower:
+            raise ValueError(
+                "The upper value_range bound must be greater "
+                "than the lower bound."
+            )
+
+        if (
+            transition_detector is not None
+            and not callable(
+                getattr(transition_detector, "is_transition", None)
+            )
+        ):
+            raise TypeError(
+                "transition_detector must provide is_transition(position)."
+            )
+
+        self.transition_detector: TransitionDetector | None = (
+            transition_detector
+        )
+        self.delta_t = delta_t
+        self.dimension = 1
+        self.D = D
+        self.bins = int(bins)
+        self.value_range = (lower, upper)
+        self.profile_update_stride = int(profile_update_stride)
+        self.seed = seed
+        self.rng = rng if rng is not None else np.random.default_rng(seed)
 
         if initial_position is None:
-            initial_position = np.zeros(self.dimension)  # Default initial position is the origin
+            initial_position = np.zeros(1, dtype=float)
+        else:
+            initial_position = np.asarray(
+                initial_position,
+                dtype=float,
+            ).reshape(-1)
 
-        self.positions = [initial_position]  # Start at the specified initial position
+        if initial_position.size != 1:
+            raise ValueError(
+                "ABFRealTime only supports one-dimensional positions."
+            )
+        if not np.all(np.isfinite(initial_position)):
+            raise ValueError(
+                "initial_position must contain only finite values."
+            )
 
-        self.seed = seed
-        self._external_rng = rng is not None
-        self.rng = (
-            rng
-            if rng is not None
-            else np.random.default_rng(seed)
-        )
+        self._validate_position_in_range(initial_position)
 
+        if b is None:
+            b = Potential(
+                dimension=1,
+                function=lambda x: 0.0,
+                first_derivative=lambda x: np.zeros(1, dtype=float),
+                second_derivative=lambda x: np.zeros((1, 1), dtype=float),
+            )
 
-    def position_to_bin(self, position):
-        x = float(np.asarray(position).reshape(-1)[0])
-        bin_index = int((x - self.value_range[0]) / (self.value_range[1] - self.value_range[0]) * self.bins)
-        return np.clip(bin_index, 0, self.bins - 1)
+        if not callable(getattr(b, "potential_prime_at", None)):
+            raise TypeError(
+                "b must provide potential_prime_at(position)."
+            )
+        if hasattr(b, "dimension") and b.dimension != 1:
+            raise ValueError(
+                "ABFRealTime requires a one-dimensional potential."
+            )
 
+        self.initial_position = initial_position.copy()
+        self.b = b
 
-    def _last_position(self):
-        return np.asarray(self.positions[-1])
+        self.positions = [self.initial_position.copy()]
+        self.force_bias = np.zeros(self.bins, dtype=float)
+        self.number_of_copies = np.zeros(self.bins, dtype=float)
 
+        self.bin_edges = np.linspace(lower, upper, self.bins + 1)
+        self.free_energy_profile = np.zeros(self.bins, dtype=float)
+        self.bias_potential = np.zeros(self.bins, dtype=float)
 
-    def _current_bin(self):
-        return self.position_to_bin(self.positions[-1])
-    
-    
+        self.real_time = 0.0
+        self.steps_completed = 0
+        self.transition_index = None
+        self.termination_reason: TerminationReason | None = None
+
+    def _last_position(self) -> np.ndarray:
+        return np.asarray(self.positions[-1], dtype=float)
+
+    @staticmethod
+    def _position_scalar(position) -> float:
+        position = np.asarray(position, dtype=float).reshape(-1)
+
+        if position.size != 1:
+            raise ValueError(
+                "ABFRealTime only supports one-dimensional positions."
+            )
+
+        x = float(position[0])
+        if not np.isfinite(x):
+            raise FloatingPointError("The ABF position is not finite.")
+
+        return x
+
+    def _validate_position_in_range(self, position) -> float:
+        x = self._position_scalar(position)
+        lower, upper = self.value_range
+
+        if x < lower or x > upper:
+            raise ValueError(
+                "ABF position outside value_range: "
+                f"x={x}, value_range={self.value_range}."
+            )
+
+        return x
+
+    def position_to_bin(self, position) -> int:
+        """Map one position to its ABF bin."""
+        x = self._validate_position_in_range(position)
+        lower, upper = self.value_range
+
+        normalized_position = (x - lower) / (upper - lower)
+        bin_index = int(normalized_position * self.bins)
+
+        return int(np.clip(bin_index, 0, self.bins - 1))
+
+    def _current_bin(self) -> int:
+        return self.position_to_bin(self._last_position())
+
     def _potential_gradient_scalar(self, position) -> float:
-        """Return the scalar derivative of a one-dimensional potential."""
         gradient = np.asarray(
             self.b.potential_prime_at(position),
             dtype=float,
@@ -91,57 +200,68 @@ class ABFRealTime:
 
         if gradient.size != 1:
             raise ValueError(
-                "ABFRealTime only supports one-dimensional potentials. "
-                f"Received {gradient.size} gradient components."
+                "ABFRealTime requires a scalar potential gradient; "
+                f"received {gradient.size} components."
             )
 
-        return float(gradient[0])
-    
-    def _update_force_estimator(self, position) -> int:
-        """
-        Update the running mean-force estimator using one trajectory sample.
+        scalar_gradient = float(gradient[0])
+        if not np.isfinite(scalar_gradient):
+            raise FloatingPointError(
+                "The physical potential gradient is not finite."
+            )
 
-        Returns
-        -------
-        int
-            Index of the bin updated by this sample.
-        """
+        return scalar_gradient
+
+    def _update_force_estimator(self, position) -> int:
+        """Update the running mean-force estimator in one bin."""
         current_bin = self.position_to_bin(position)
         sample_force = self._potential_gradient_scalar(position)
 
-        n = self.number_of_copies[current_bin]
-
+        count = self.number_of_copies[current_bin]
         self.force_bias[current_bin] = (
-            n * self.force_bias[current_bin]
-            + sample_force
-        ) / (n + 1)
-
-        self.number_of_copies[current_bin] = n + 1
+            count * self.force_bias[current_bin] + sample_force
+        ) / (count + 1.0)
+        self.number_of_copies[current_bin] = count + 1.0
 
         return current_bin
-    
-    def simulate_one_step(self) -> bool:
-        """
-        Perform one ABF integration step.
 
-        Returns
-        -------
-        bool
-            True when a transition is detected after the step.
-        """
-        last_position = self._last_position()
-        x = float(last_position.reshape(-1)[0])
-
-        if x < self.range[0] or x > self.range[1]:
-            raise ValueError(
-                "Position out of bounds. "
-                f"Received x={x}, expected a value inside {self.range}."
-            )
-
-        current_bin = self.position_to_bin(last_position)
-        physical_gradient = self._potential_gradient_scalar(
-            last_position
+    def _transition_detected_at(self, position) -> bool:
+        return (
+            self.transition_detector is not None
+            and self.transition_detector.is_transition(position)
         )
+
+    def update_profiles(self):
+        """Reconstruct free-energy and bias-potential profiles."""
+        from .abf_profiles import reconstruct_abf_profiles
+
+        (
+            self.bin_edges,
+            self.free_energy_profile,
+            self.bias_potential,
+        ) = reconstruct_abf_profiles(
+            force_bias=self.force_bias,
+            value_range=self.value_range,
+        )
+
+        return self.free_energy_profile, self.bias_potential
+
+    def step(self) -> bool:
+        """Advance the ABF dynamics by one integration step."""
+        if self.transition_index is not None:
+            return True
+
+        current_position = self._last_position()
+        current_bin = self._current_bin()
+        physical_gradient = self._potential_gradient_scalar(
+            current_position
+        )
+
+        applied_bias = float(self.bias_potential[current_bin])
+        if not np.isfinite(applied_bias):
+            raise FloatingPointError(
+                "The ABF bias potential is not finite."
+            )
 
         drift = np.array(
             [
@@ -153,204 +273,100 @@ class ABFRealTime:
             ],
             dtype=float,
         )
-
         noise = (
             np.sqrt(2.0 * self.D * self.delta_t)
-            * self.rng.standard_normal(self.dimension)
+            * self.rng.standard_normal(1)
         )
+        new_position = current_position + drift + noise
 
-        # The physical-time increment uses the bias applied during this step.
-        exponent = self.bias_potential[current_bin] / self.D
+        self._validate_position_in_range(new_position)
 
-        self.real_time += (
-            np.exp(exponent)
-            * self.delta_t
-        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            time_weight = float(np.exp(applied_bias / self.D))
 
-        new_position = last_position + drift + noise
+        if not np.isfinite(time_weight):
+            raise FloatingPointError(
+                "The ABF reweighting factor is not finite."
+            )
 
-        self.positions.append(
-            np.asarray(new_position, dtype=float)
-        )
+        self.positions.append(np.asarray(new_position, dtype=float))
+        self.real_time += time_weight * self.delta_t
+        self.steps_completed += 1
 
-        # Each generated position contributes one force observation.
         self._update_force_estimator(new_position)
 
-        # Reconstruct the profiles after every force observation.
-        self.steps_completed += 1
-
-        if (
-            self.steps_completed
-            % self.profile_update_stride
-            == 0
-        ):
+        if self.steps_completed % self.profile_update_stride == 0:
             self.update_profiles()
 
-        return self.td.is_transition(new_position)
-
-    def step(self) -> bool:
-        current_position = self._last_position()
-
-        physical_gradient = np.asarray(
-            self.b.potential_prime_at(current_position),
-            dtype=float,
-        )
-        bias_gradient = self.bias_potential_prime_at(
-            current_position
-        )
-
-        drift = -(
-            physical_gradient + bias_gradient
-        ) * self.delta_t
-
-        noise = (
-            np.sqrt(2.0 * self.D * self.delta_t)
-            * self.rng.standard_normal(self.dimension)
-        )
-
-        new_position = (
-            current_position
-            + drift
-            + noise
-        )
-
-        bias_value = self.bias_potential_at(
-            new_position
-        )
-        weight = np.exp(bias_value / self.D)
-
-        if not np.isfinite(weight):
-            raise FloatingPointError(
-                "The ABP reweighting factor is not finite."
-            )
-
-        self.positions.append(new_position)
-        self.weights.append(weight)
-        self.real_time += weight * self.delta_t
-        self.steps_completed += 1
-
-        if self.td.is_transition(new_position):
-            self.transition_index = (
-                len(self.positions) - 1
-            )
+        if self._transition_detected_at(new_position):
+            self.transition_index = len(self.positions) - 1
+            self.termination_reason = "transition"
             return True
-
-        if (
-            self.steps_completed
-            % self.deposition_stride
-            == 0
-        ):
-            self.centers.append(
-                new_position.copy()
-            )
 
         return False
 
-    def simulate(self, max_iters=1_000_000):
-        """
-        Run at most ``max_iters`` integration steps.
-
-        Notes
-        -----
-        ``max_iters`` is retained for compatibility, but it represents
-        integration steps, not batches.
-        """
-        if isinstance(max_iters, bool) or not isinstance(
-            max_iters,
-            (int, np.integer),
-        ):
-            raise TypeError("max_iters must be an integer.")
-
-        if max_iters <= 0:
-            raise ValueError("max_iters must be strictly positive.")
-
-        for _ in range(int(max_iters)):
-            transition_detected = self.simulate_one_step()
-
-            if transition_detected:
-                self.transition_index = len(self.positions) - 1
-                break
-
-        transition_time = (
-            self.transition_index * self.delta_t
-            if self.transition_index is not None
-            else None
-        )
+    def result(
+        self,
+        termination_reason: TerminationReason | None = None,
+    ) -> ABFResult:
+        """Build an immutable result from the current simulation state."""
+        if termination_reason is None:
+            termination_reason = (
+                "transition"
+                if self.transition_index is not None
+                else "max_steps"
+            )
 
         self.update_profiles()
 
-        return self.real_time, transition_time
-    
-    def update_profiles(self):
-        from .abf_profiles import reconstruct_abf_profiles
-
-        (
-            _,
-            self.free_energy_profile,
-            self.bias_potential,
-        ) = reconstruct_abf_profiles(
-            force_bias=self.force_bias,
-            value_range=self.range,
-        )
-
-        return (
-            self.free_energy_profile,
-            self.bias_potential,
-        )
-    
-
-    def result(self):
-        from .abf_profiles import reconstruct_abf_profiles
-        from .results import ABFResult
-
-        (
-            bin_edges,
-            free_energy,
-            bias_potential,
-        ) = reconstruct_abf_profiles(
-            force_bias=self.force_bias,
-            value_range=self.range,
-        )
-
-        positions = np.asarray(
-            self.positions,
-            dtype=float,
-        )
-
         return ABFResult(
             method="abf",
-            positions=positions,
+            positions=np.asarray(
+                self.positions,
+                dtype=float,
+            ).reshape(-1, 1),
             delta_t=self.delta_t,
             diffusion=self.D,
             seed=self.seed,
             transition_index=self.transition_index,
-            physical_time=self.real_time,
-            force_bias=np.asarray(
-                self.force_bias,
-                dtype=float,
-            ).copy(),
-            visit_counts=np.asarray(
-                self.number_of_copies,
-                dtype=float,
-            ).copy(),
-            bin_edges=bin_edges,
-            free_energy=free_energy,
-            bias_potential=bias_potential,
+            physical_time=float(self.real_time),
+            termination_reason=termination_reason,
+            force_bias=self.force_bias.copy(),
+            visit_counts=self.number_of_copies.copy(),
+            bin_edges=self.bin_edges.copy(),
+            free_energy=self.free_energy_profile.copy(),
+            bias_potential=self.bias_potential.copy(),
             metadata={
-                "range": tuple(self.range),
+                "dimension": self.dimension,
                 "bins": self.bins,
-                "profile_update_stride": (
-                    self.profile_update_stride
-                ),
+                "value_range": tuple(self.value_range),
+                "profile_update_stride": self.profile_update_stride,
             },
         )
 
+    def run(self, max_steps=1_000_000) -> ABFResult:
+        """Run at most ``max_steps`` additional integration steps."""
+        if (
+            isinstance(max_steps, bool)
+            or not isinstance(max_steps, (int, np.integer))
+        ):
+            raise TypeError("max_steps must be an integer.")
+        if max_steps <= 0:
+            raise ValueError("max_steps must be strictly positive.")
 
-    def run(self, max_steps=1_000_000):
-        for _ in range(max_steps):
+        if self._transition_detected_at(self._last_position()):
+            self.transition_index = len(self.positions) - 1
+            self.termination_reason = "transition"
+            return self.result("transition")
+
+        for _ in range(int(max_steps)):
             if self.step():
-                break
+                return self.result("transition")
 
-        self.update_profiles()
-        return self.result()
-    
+        self.termination_reason = "max_steps"
+        return self.result("max_steps")
+
+    def simulate(self, max_iters=1_000_000):
+        """Compatibility wrapper around :meth:`run`."""
+        result = self.run(max_steps=max_iters)
+        return result.physical_time, result.biased_transition_time
