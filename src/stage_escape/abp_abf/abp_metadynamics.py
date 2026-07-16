@@ -2,13 +2,26 @@ from __future__ import annotations
 
 import numpy as np
 
+from ._validation import (
+    as_position,
+    prepare_rng,
+    validate_positive_float,
+    validate_positive_int,
+    validate_transition_detector,
+)
+from .abp_bias import gaussian_bias_gradient, gaussian_bias_value
 from .potential import Potential
 from .results import ABPResult, TerminationReason
 from .transition_detector import TransitionDetector
 
 
 class ABPMetaDynamics:
-    """Adaptive biasing potential simulation based on metadynamics."""
+    """Adaptive biasing potential simulation using Gaussian metadynamics.
+
+    The class owns only stochastic integration and bias deposition. Transition
+    logic is injected through a stateless :class:`TransitionDetector`; plotting
+    and distribution analysis are deliberately kept outside the simulator.
+    """
 
     def __init__(
         self,
@@ -23,117 +36,55 @@ class ABPMetaDynamics:
         sigma=0.001,
         seed=None,
         rng=None,
-    ):
-        if seed is not None and rng is not None:
-            raise ValueError("Provide either seed or rng, not both.")
-
-        if (
-            isinstance(deposition_stride, bool)
-            or not isinstance(deposition_stride, (int, np.integer))
-        ):
-            raise TypeError("deposition_stride must be an integer.")
-        if deposition_stride <= 0:
-            raise ValueError("deposition_stride must be strictly positive.")
-
-        if (
-            isinstance(dimension, bool)
-            or not isinstance(dimension, (int, np.integer))
-        ):
-            raise TypeError("dimension must be an integer.")
-        if dimension <= 0:
-            raise ValueError("dimension must be strictly positive.")
-
-        delta_t = float(delta_t)
-        D = float(D)
-        W = float(W)
-        sigma = float(sigma)
-
-        if not np.isfinite(delta_t) or delta_t <= 0.0:
-            raise ValueError("delta_t must be finite and strictly positive.")
-        if not np.isfinite(D) or D <= 0.0:
-            raise ValueError("D must be finite and strictly positive.")
-        if not np.isfinite(W) or W < 0.0:
-            raise ValueError("W must be finite and non-negative.")
-        if not np.isfinite(sigma) or sigma <= 0.0:
-            raise ValueError("sigma must be finite and strictly positive.")
-
-        if (
-            transition_detector is not None
-            and not callable(
-                getattr(transition_detector, "is_transition", None)
-            )
-        ):
-            raise TypeError(
-                "transition_detector must provide is_transition(position)."
-            )
-
-        self.deposition_stride = int(deposition_stride)
-        self.transition_detector: TransitionDetector | None = (
-            transition_detector
+        cutoff=5.0,
+    ) -> None:
+        self.deposition_stride = validate_positive_int(
+            "deposition_stride", deposition_stride
         )
-        self.delta_t = delta_t
-        self.dimension = int(dimension)
-        self.D = D
-        self.W = W
-        self.sigma = sigma
+        self.delta_t = validate_positive_float("delta_t", delta_t)
+        self.dimension = validate_positive_int("dimension", dimension)
+        self.D = validate_positive_float("D", D)
+        self.W = validate_positive_float("W", W, allow_zero=True)
+        self.sigma = validate_positive_float("sigma", sigma)
+        self.cutoff = (
+            None
+            if cutoff is None
+            else validate_positive_float("cutoff", cutoff)
+        )
+        validate_transition_detector(transition_detector)
+        self.transition_detector: TransitionDetector | None = transition_detector
+
         self.seed = seed
-        self.rng = rng if rng is not None else np.random.default_rng(seed)
+        self.rng, self._external_rng = prepare_rng(seed=seed, rng=rng)
+        self.initial_position = as_position(
+            np.zeros(self.dimension) if initial_position is None else initial_position,
+            self.dimension,
+            name="initial_position",
+        )
 
-        if initial_position is None:
-            initial_position = np.zeros(self.dimension, dtype=float)
-        else:
-            initial_position = np.asarray(
-                initial_position,
-                dtype=float,
-            ).reshape(-1)
+        self.b = Potential.zero(self.dimension) if b is None else b
+        if not callable(getattr(self.b, "potential_prime_at", None)):
+            raise TypeError("b must provide potential_prime_at(position).")
+        if getattr(self.b, "dimension", self.dimension) != self.dimension:
+            raise ValueError("The potential dimension does not match dimension.")
 
-        if initial_position.size != self.dimension:
-            raise ValueError(
-                "initial_position must contain exactly "
-                f"{self.dimension} components."
-            )
-        if not np.all(np.isfinite(initial_position)):
-            raise ValueError(
-                "initial_position must contain only finite values."
-            )
+        self.reset(reset_rng=False)
 
-        if b is None:
-            b = Potential(
-                dimension=self.dimension,
-                function=lambda x: 0.0,
-                first_derivative=lambda x: np.zeros(
-                    self.dimension,
-                    dtype=float,
-                ),
-                second_derivative=lambda x: np.zeros(
-                    (self.dimension, self.dimension),
-                    dtype=float,
-                ),
-            )
+    def reset(self, *, reset_rng: bool = True) -> None:
+        """Reset trajectory, bias and clocks.
 
-        if not callable(getattr(b, "potential_prime_at", None)):
-            raise TypeError(
-                "b must provide potential_prime_at(position)."
-            )
-        if (
-            hasattr(b, "dimension")
-            and b.dimension != self.dimension
-        ):
-            raise ValueError(
-                "The potential dimension does not match "
-                "the simulation dimension."
-            )
-
-        self.initial_position = initial_position.copy()
-        self.b = b
-
+        Internally seeded generators are recreated by default. Externally
+        supplied generators are never rewound because their state is owned by
+        the caller.
+        """
+        if reset_rng and not self._external_rng:
+            self.rng = np.random.default_rng(self.seed)
         self.positions = [self.initial_position.copy()]
-        self.centers = []
+        self.centers: list[np.ndarray] = []
         self.weights = [1.0]
-
         self.real_time = 0.0
         self.steps_completed = 0
-        self.transition_index = None
+        self.transition_index: int | None = None
         self.termination_reason: TerminationReason | None = None
 
     def _last_position(self) -> np.ndarray:
@@ -141,41 +92,37 @@ class ABPMetaDynamics:
 
     def _physical_gradient_at(self, position) -> np.ndarray:
         gradient = np.asarray(
-            self.b.potential_prime_at(position),
-            dtype=float,
+            self.b.potential_prime_at(position), dtype=float
         ).reshape(-1)
-
         if gradient.size != self.dimension:
             raise ValueError(
-                "The physical potential gradient must contain "
-                f"{self.dimension} components; received {gradient.size}."
+                "The physical gradient must contain "
+                f"{self.dimension} components."
             )
         if not np.all(np.isfinite(gradient)):
-            raise FloatingPointError(
-                "The physical potential gradient is not finite."
-            )
-
+            raise FloatingPointError("The physical gradient is not finite.")
         return gradient
 
     def bias_potential_at(self, position) -> float:
-        from .abp_bias import gaussian_bias_value
-
         return gaussian_bias_value(
             position=position,
             centers=self.centers,
             height=self.W,
             sigma=self.sigma,
+            cutoff=self.cutoff,
         )
 
     def bias_potential_prime_at(self, position) -> np.ndarray:
-        from .abp_bias import gaussian_bias_gradient
-
         return gaussian_bias_gradient(
             position=position,
             centers=self.centers,
             height=self.W,
             sigma=self.sigma,
+            cutoff=self.cutoff,
         )
+
+    def effective_potential_at(self, position) -> float:
+        return self.b.potential_at(position) + self.bias_potential_at(position)
 
     def _transition_detected_at(self, position) -> bool:
         return (
@@ -184,26 +131,15 @@ class ABPMetaDynamics:
         )
 
     def step(self) -> bool:
-        """Advance the biased dynamics by one integration step."""
+        """Advance the biased dynamics by exactly one integration step."""
         if self.transition_index is not None:
             return True
 
         current_position = self._last_position()
         physical_gradient = self._physical_gradient_at(current_position)
-        bias_gradient = np.asarray(
-            self.bias_potential_prime_at(current_position),
-            dtype=float,
-        ).reshape(-1)
-
-        if bias_gradient.size != self.dimension:
-            raise ValueError(
-                "The bias gradient must contain "
-                f"{self.dimension} components; received {bias_gradient.size}."
-            )
-        if not np.all(np.isfinite(bias_gradient)):
-            raise FloatingPointError(
-                "The bias potential gradient is not finite."
-            )
+        bias_gradient = self.bias_potential_prime_at(current_position)
+        if bias_gradient.shape != (self.dimension,):
+            raise ValueError("The bias gradient has an invalid shape.")
 
         drift = -(physical_gradient + bias_gradient) * self.delta_t
         noise = (
@@ -211,20 +147,16 @@ class ABPMetaDynamics:
             * self.rng.standard_normal(self.dimension)
         )
         new_position = current_position + drift + noise
-
         if not np.all(np.isfinite(new_position)):
             raise FloatingPointError("The new ABP position is not finite.")
 
         bias_value = self.bias_potential_at(new_position)
         with np.errstate(over="ignore", invalid="ignore"):
             weight = float(np.exp(bias_value / self.D))
+        if not np.isfinite(weight) or weight <= 0.0:
+            raise FloatingPointError("The ABP reweighting factor is invalid.")
 
-        if not np.isfinite(weight):
-            raise FloatingPointError(
-                "The ABP reweighting factor is not finite."
-            )
-
-        self.positions.append(np.asarray(new_position, dtype=float))
+        self.positions.append(new_position.copy())
         self.weights.append(weight)
         self.real_time += weight * self.delta_t
         self.steps_completed += 1
@@ -243,18 +175,10 @@ class ABPMetaDynamics:
         self,
         termination_reason: TerminationReason | None = None,
     ) -> ABPResult:
-        """Build an immutable result from the current simulation state."""
         if termination_reason is None:
             termination_reason = (
-                "transition"
-                if self.transition_index is not None
-                else "max_steps"
+                "transition" if self.transition_index is not None else "max_steps"
             )
-
-        positions = np.asarray(
-            self.positions,
-            dtype=float,
-        ).reshape(-1, self.dimension)
 
         centers = np.asarray(self.centers, dtype=float)
         if centers.size == 0:
@@ -262,55 +186,42 @@ class ABPMetaDynamics:
         else:
             centers = centers.reshape(-1, self.dimension)
 
-        weights = np.asarray(self.weights, dtype=float)
-        if len(weights) != len(positions):
-            raise RuntimeError(
-                "ABP produced an inconsistent result: "
-                f"{len(positions)} positions and {len(weights)} weights."
-            )
-
         return ABPResult(
             method="abp",
-            positions=positions,
+            positions=np.asarray(self.positions, dtype=float).reshape(
+                -1, self.dimension
+            ),
             delta_t=self.delta_t,
             diffusion=self.D,
             seed=self.seed,
             transition_index=self.transition_index,
             physical_time=float(self.real_time),
             termination_reason=termination_reason,
-            weights=weights.copy(),
-            centers=centers.copy(),
+            weights=np.asarray(self.weights, dtype=float),
+            centers=centers,
             bias_height=self.W,
             bias_width=self.sigma,
             metadata={
                 "dimension": self.dimension,
                 "deposition_stride": self.deposition_stride,
+                "cutoff": self.cutoff,
             },
         )
 
-    def run(self, max_steps=1_000_000) -> ABPResult:
-        """Run at most ``max_steps`` additional integration steps."""
-        if (
-            isinstance(max_steps, bool)
-            or not isinstance(max_steps, (int, np.integer))
-        ):
-            raise TypeError("max_steps must be an integer.")
-        if max_steps <= 0:
-            raise ValueError("max_steps must be strictly positive.")
+    def run(self, max_steps=1_000_000, *, reset: bool = False) -> ABPResult:
+        max_steps = validate_positive_int("max_steps", max_steps)
+        if reset:
+            self.reset()
 
         if self._transition_detected_at(self._last_position()):
             self.transition_index = len(self.positions) - 1
             self.termination_reason = "transition"
             return self.result("transition")
 
-        for _ in range(int(max_steps)):
+        for _ in range(max_steps):
             if self.step():
                 return self.result("transition")
 
         self.termination_reason = "max_steps"
         return self.result("max_steps")
 
-    def simulate(self, max_iters=1_000_000):
-        """Compatibility wrapper around :meth:`run`."""
-        result = self.run(max_steps=max_iters)
-        return result.physical_time, result.biased_transition_time
