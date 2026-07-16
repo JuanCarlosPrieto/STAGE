@@ -15,6 +15,7 @@ class ABFRealTime:
         range=(-3, 3),
         seed=None,
         rng=None,
+        profile_update_stride=100,
     ):
         if seed is not None and rng is not None:
             raise ValueError("Provide either seed or rng, not both.")
@@ -33,6 +34,26 @@ class ABFRealTime:
         self.range = range  # Range for the biasing potential
         self.free_energy_profile = np.zeros(bins)  # Initialize free energy profile
         self.real_time = 0.0
+        
+        if (
+            isinstance(profile_update_stride, bool)
+            or not isinstance(
+                profile_update_stride,
+                (int, np.integer),
+            )
+        ):
+            raise TypeError(
+                "profile_update_stride must be an integer."
+            )
+
+        if profile_update_stride <= 0:
+            raise ValueError(
+                "profile_update_stride must be strictly positive."
+            )
+
+        self.profile_update_stride = profile_update_stride
+        self.steps_completed = 0
+        self.transition_index = None
 
         if initial_position is None:
             initial_position = np.zeros(self.dimension)  # Default initial position is the origin
@@ -47,39 +68,20 @@ class ABFRealTime:
             else np.random.default_rng(seed)
         )
 
+
     def position_to_bin(self, position):
         x = float(np.asarray(position).reshape(-1)[0])
         bin_index = int((x - self.range[0]) / (self.range[1] - self.range[0]) * self.bins)
         return np.clip(bin_index, 0, self.bins - 1)
 
+
     def _last_position(self):
         return np.asarray(self.positions[-1])
+
 
     def _current_bin(self):
         return self.position_to_bin(self.positions[-1])
     
-    def _physical_force_at(self, position):
-        """
-        Return the derivative of the physical potential as a scalar.
-
-        ABFRealTime is currently restricted to one dimension, while
-        Potential.potential_prime_at returns a gradient vector.
-        """
-        gradient = np.asarray(
-            self.b.potential_prime_at(
-                np.asarray(position, dtype=float)
-            ),
-            dtype=float,
-        ).reshape(-1)
-
-        if gradient.size != self.dimension:
-            raise ValueError(
-                "The potential gradient must have the same dimension "
-                f"as the simulation. Expected {self.dimension}, "
-                f"received {gradient.size}."
-            )
-
-        return float(gradient[0])
     
     def _potential_gradient_scalar(self, position) -> float:
         """Return the scalar derivative of a one-dimensional potential."""
@@ -176,7 +178,14 @@ class ABFRealTime:
         self._update_force_estimator(new_position)
 
         # Reconstruct the profiles after every force observation.
-        self.update_profiles()
+        self.steps_completed += 1
+
+        if (
+            self.steps_completed
+            % self.profile_update_stride
+            == 0
+        ):
+            self.update_profiles()
 
         # Only the newly generated point needs to be checked here.
         self.td.positions = np.asarray(
@@ -238,41 +247,91 @@ class ABFRealTime:
         if max_iters <= 0:
             raise ValueError("max_iters must be strictly positive.")
 
-        transition_index = None
-
         for _ in range(int(max_iters)):
             transition_detected = self.simulate_one_step()
 
             if transition_detected:
-                transition_index = len(self.positions) - 1
+                self.transition_index = len(self.positions) - 1
                 break
 
         transition_time = (
-            transition_index * self.delta_t
-            if transition_index is not None
+            self.transition_index * self.delta_t
+            if self.transition_index is not None
             else None
         )
+
+        self.update_profiles()
 
         return self.real_time, transition_time
     
     def update_profiles(self):
-        dx = (self.range[1] - self.range[0]) / self.bins
+        from .abf_profiles import reconstruct_abf_profiles
 
-        free_energy = np.zeros(self.bins)
-        free_energy[1:] = np.cumsum(
-            0.5
-            * (self.force_bias[:-1] + self.force_bias[1:])
-            * dx
+        (
+            _,
+            self.free_energy_profile,
+            self.bias_potential,
+        ) = reconstruct_abf_profiles(
+            force_bias=self.force_bias,
+            value_range=self.range,
         )
-        free_energy -= free_energy.min()
 
-        bias_potential = -free_energy
-        bias_potential -= bias_potential.min()
+        return (
+            self.free_energy_profile,
+            self.bias_potential,
+        )
+    
 
-        self.free_energy_profile = free_energy
-        self.bias_potential = bias_potential
+    def result(self):
+        from .abf_profiles import reconstruct_abf_profiles
+        from .results import ABFResult
 
-        return free_energy, bias_potential
+        (
+            bin_edges,
+            free_energy,
+            bias_potential,
+        ) = reconstruct_abf_profiles(
+            force_bias=self.force_bias,
+            value_range=self.range,
+        )
+
+        positions = np.asarray(
+            self.positions,
+            dtype=float,
+        )
+
+        return ABFResult(
+            method="abf",
+            positions=positions,
+            delta_t=self.delta_t,
+            diffusion=self.D,
+            seed=self.seed,
+            transition_index=self.transition_index,
+            physical_time=self.real_time,
+            force_bias=np.asarray(
+                self.force_bias,
+                dtype=float,
+            ).copy(),
+            visit_counts=np.asarray(
+                self.number_of_copies,
+                dtype=float,
+            ).copy(),
+            bin_edges=bin_edges,
+            free_energy=free_energy,
+            bias_potential=bias_potential,
+            metadata={
+                "range": tuple(self.range),
+                "bins": self.bins,
+                "profile_update_stride": (
+                    self.profile_update_stride
+                ),
+            },
+        )
+
+
+    def run(self, max_iters=1_000_000):
+        self.simulate(max_iters=max_iters)
+        return self.result()
 
 
     def plot_free_energy(self):

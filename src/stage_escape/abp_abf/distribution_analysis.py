@@ -169,3 +169,49 @@ def theoretical_marginal_2d(
         raise ValueError("The marginal density cannot be normalized.")
 
     return coordinate, marginal / normalization
+
+
+def _evaluate_potential_on_grid(
+    self,
+    potential_type,
+    x_range=(-2, 2),
+    y_range=(-2, 2),
+    num_points=100
+):
+    """
+    Evaluate one of the potentials on a 2D grid.
+
+    potential_type can be:
+    - "original"
+    - "biasing"
+    - "final"
+    """
+
+    x_values = np.linspace(x_range[0], x_range[1], num_points)
+    y_values = np.linspace(y_range[0], y_range[1], num_points)
+
+    X, Y = np.meshgrid(x_values, y_values)
+    Z = np.zeros_like(X, dtype=float)
+
+    for i in range(X.shape[0]):
+        for j in range(X.shape[1]):
+            point = np.array([X[i, j], Y[i, j]])
+
+            if potential_type == "original":
+                Z[i, j] = self.b.potential_at(point)
+
+            elif potential_type == "biasing":
+                Z[i, j] = self.bias_potential_at(point)
+
+            elif potential_type == "final":
+                Z[i, j] = (
+                    self.b.potential_at(point)
+                    + self.bias_potential_at(point)
+                )
+
+            else:
+                raise ValueError(
+                    "potential_type must be 'original', 'biasing', or 'final'"
+                )
+
+    return X, Y, Z
