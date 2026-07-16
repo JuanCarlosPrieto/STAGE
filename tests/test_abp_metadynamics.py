@@ -16,15 +16,14 @@ def zero_potential():
 
 def inactive_detector():
     return TransitionDetector(
-        positions=np.empty((0, 1)),
-        cv=lambda x: float(np.asarray(x)[0]),
+        collective_variable=lambda x: float(x[0]),
         threshold=np.inf,
     )
 
 
 def build_simulation(seed):
     return ABPMetaDynamics(
-        num_steps=20,
+        deposition_stride=20,
         td=inactive_detector(),
         delta_t=1e-3,
         dimension=1,

@@ -1,13 +1,49 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Literal
+
+import numpy as np
+
+
+TransitionDirection = Literal["above", "below"]
+
+
+@dataclass(frozen=True, slots=True)
 class TransitionDetector:
-    def __init__(self, positions, cv, threshold):
-        self.positions = positions
-        self.cv = cv
-        self.threshold = threshold
+    collective_variable: Callable[[np.ndarray], float]
+    threshold: float
+    direction: TransitionDirection = "above"
 
+    def __post_init__(self):
+        if self.direction not in {"above", "below"}:
+            raise ValueError(
+                "direction must be 'above' or 'below'."
+            )
 
-    def detect_transition(self):
-        for i, position in enumerate(self.positions):
-            if self.cv(position) > self.threshold:
-                return i  # Return the index of the transition point
-        
-        return None  # Return None if no transition is detected
+    def is_transition(self, position) -> bool:
+        value = float(
+            self.collective_variable(
+                np.asarray(position, dtype=float)
+            )
+        )
+
+        if self.direction == "above":
+            return value > self.threshold
+
+        return value < self.threshold
+
+    def first_transition_index(
+        self,
+        positions,
+    ) -> int | None:
+        positions = np.asarray(
+            positions,
+            dtype=float,
+        )
+
+        for index, position in enumerate(positions):
+            if self.is_transition(position):
+                return index
+
+        return None

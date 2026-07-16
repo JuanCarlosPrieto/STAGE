@@ -23,7 +23,7 @@ class ABPEquivalentNarrowEscape:
             raise ValueError(f"Error checking if initial position is inside the surface: {e}, check the surface functions and the initial position.")
         
         if len(abp.positions) <= 1:
-            abp.simulate(max_iters=abp.num_steps + 1)
+            abp.simulate(max_iters=abp.deposition_stride + 1)
         
 
     def check_escape(self, point):
@@ -88,7 +88,7 @@ class ABPEquivalentNarrowEscape:
             time at which the escape occurs, or None if no escape occurs.
         """
         curr = 0  # Start checking from the first position
-        while len(self.abp.positions) <= max_steps + self.abp.num_steps:
+        while len(self.abp.positions) <= max_steps + self.abp.deposition_stride:
             for i in range(curr, len(self.abp.positions) - 1):            
                 a = self.abp.positions[i]
                 b = self.abp.positions[i + 1]
@@ -107,7 +107,7 @@ class ABPEquivalentNarrowEscape:
                 curr = i
                 break  # Break to restart the loop with the updated positions
 
-            self.abp.simulate(max_iters=self.abp.num_steps + 1)  # Continue the simulation from the last valid position
+            self.abp.simulate(max_iters=self.abp.deposition_stride + 1)  # Continue the simulation from the last valid position
             
         return None, None  # No escape occurred
     

@@ -38,7 +38,7 @@ class BrownianMotion:
 
     def __init__(
         self,
-        num_steps,
+        deposition_stride,
         delta_t,
         dimension=1,
         D=1.0,
@@ -47,14 +47,14 @@ class BrownianMotion:
         seed=None,
         rng=None,
     ):
-        self.num_steps = int(num_steps)
+        self.deposition_stride = int(deposition_stride)
         self.delta_t = float(delta_t)
         self.dimension = int(dimension)
         self.D = float(D)
         self.b = b
 
-        if self.num_steps < 2:
-            raise ValueError("num_steps must be at least 2.")
+        if self.deposition_stride < 2:
+            raise ValueError("deposition_stride must be at least 2.")
 
         if self.delta_t <= 0:
             raise ValueError("delta_t must be positive.")
@@ -120,15 +120,15 @@ class BrownianMotion:
 
         return drift
 
-    def simulate(self, num_steps=None, reset=False):
+    def simulate(self, deposition_stride=None, reset=False):
         """
         Extend the Brownian trajectory.
 
         Parameters
         ----------
-        num_steps : int, optional
+        deposition_stride : int, optional
             Number of points to generate in this simulation block. If None,
-            self.num_steps is used.
+            self.deposition_stride is used.
 
         reset : bool
             If True, reset the trajectory before simulating.
@@ -147,10 +147,10 @@ class BrownianMotion:
         if reset:
             self.reset()
 
-        n_steps = self.num_steps if num_steps is None else int(num_steps)
+        n_steps = self.deposition_stride if deposition_stride is None else int(deposition_stride)
 
         if n_steps < 2:
-            raise ValueError("num_steps must be at least 2.")
+            raise ValueError("deposition_stride must be at least 2.")
 
         step_size = np.sqrt(2.0 * self.D * self.delta_t)
 

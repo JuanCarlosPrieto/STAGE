@@ -71,7 +71,7 @@ class NaiveNarrowEscape:
             time at which the escape occurs, or None if no escape occurs.
         """
         curr = 0  # Start checking from the first position
-        while len(self.brownian_motion.positions) <= max_steps + self.brownian_motion.num_steps:
+        while len(self.brownian_motion.positions) <= max_steps + self.brownian_motion.deposition_stride:
             for i in range(curr, len(self.brownian_motion.positions) - 1):            
                 a = self.brownian_motion.positions[i]
                 b = self.brownian_motion.positions[i + 1]

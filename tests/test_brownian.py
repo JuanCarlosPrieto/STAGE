@@ -6,7 +6,7 @@ from stage_escape import BrownianMotion
 
 def test_same_seed_produces_same_brownian_path():
     simulation_1 = BrownianMotion(
-        num_steps=100,
+        deposition_stride=100,
         delta_t=1e-3,
         dimension=2,
         D=0.5,
@@ -14,7 +14,7 @@ def test_same_seed_produces_same_brownian_path():
     )
 
     simulation_2 = BrownianMotion(
-        num_steps=100,
+        deposition_stride=100,
         delta_t=1e-3,
         dimension=2,
         D=0.5,
@@ -29,7 +29,7 @@ def test_same_seed_produces_same_brownian_path():
 
 def test_different_seeds_produce_different_paths():
     simulation_1 = BrownianMotion(
-        num_steps=100,
+        deposition_stride=100,
         delta_t=1e-3,
         dimension=1,
         D=0.5,
@@ -37,7 +37,7 @@ def test_different_seeds_produce_different_paths():
     )
 
     simulation_2 = BrownianMotion(
-        num_steps=100,
+        deposition_stride=100,
         delta_t=1e-3,
         dimension=1,
         D=0.5,
@@ -52,7 +52,7 @@ def test_different_seeds_produce_different_paths():
 
 def test_reset_reproduces_path():
     simulation = BrownianMotion(
-        num_steps=100,
+        deposition_stride=100,
         delta_t=1e-3,
         dimension=1,
         D=0.5,
@@ -70,7 +70,7 @@ def test_seed_and_rng_cannot_be_given_together():
 
     with pytest.raises(ValueError):
         BrownianMotion(
-            num_steps=10,
+            deposition_stride=10,
             delta_t=1e-3,
             seed=12345,
             rng=rng,

@@ -5,7 +5,7 @@ from .potential import Potential
 class ABPMetaDynamics:
     def __init__(
         self,
-        num_steps,
+        deposition_stride,
         td,
         delta_t,
         dimension=1,
@@ -20,7 +20,6 @@ class ABPMetaDynamics:
         if seed is not None and rng is not None:
             raise ValueError("Provide either seed or rng, not both.")
 
-        self.num_steps = num_steps + 1
         self.td = td
         self.delta_t = delta_t
         self.dimension = dimension
@@ -91,52 +90,63 @@ class ABPMetaDynamics:
         )
 
 
-    def simulate_steps(self):
-        for _ in range(1, self.num_steps):
-            current_position = self._last_position()
+    def step(self) -> bool:
+        current_position = self._last_position()
 
-            physical_force = self.b.potential_prime_at(
-                current_position
-            )
-
-            bias_force = self.bias_potential_prime_at(
-                current_position
-            )
-
-            drift = -(
-                physical_force + bias_force
-            ) * self.delta_t
-
-            step_size = np.sqrt(
-                2.0 * self.D * self.delta_t
-            )
-
-            noise = self.rng.standard_normal(
-                self.dimension
-            )
-
-            step = step_size * noise
-            new_position = current_position + drift + step
-
-            bias_value = self.bias_potential_at(new_position)
-            weight = np.exp(bias_value / self.D)
-
-            self.real_time += weight * self.delta_t
-            self.positions.append(new_position)
-            self.weights.append(weight)
-
-            self.td.positions = np.asarray([new_position], dtype=float)
-
-            if self.td.detect_transition() is not None:
-                self.transition_index = len(self.positions) - 1
-                return self.transition_index
-
-        self.td.positions = np.asarray(
-            self.positions[-self.num_steps:],
+        physical_gradient = np.asarray(
+            self.b.potential_prime_at(current_position),
             dtype=float,
         )
+        bias_gradient = self.bias_potential_prime_at(
+            current_position
+        )
 
-        return None
+        drift = -(
+            physical_gradient + bias_gradient
+        ) * self.delta_t
+
+        noise = (
+            np.sqrt(2.0 * self.D * self.delta_t)
+            * self.rng.standard_normal(self.dimension)
+        )
+
+        new_position = (
+            current_position
+            + drift
+            + noise
+        )
+
+        bias_value = self.bias_potential_at(
+            new_position
+        )
+        weight = np.exp(bias_value / self.D)
+
+        if not np.isfinite(weight):
+            raise FloatingPointError(
+                "The ABP reweighting factor is not finite."
+            )
+
+        self.positions.append(new_position)
+        self.weights.append(weight)
+        self.real_time += weight * self.delta_t
+        self.steps_completed += 1
+
+        if self.td.is_transition(new_position):
+            self.transition_index = (
+                len(self.positions) - 1
+            )
+            return True
+
+        if (
+            self.steps_completed
+            % self.deposition_stride
+            == 0
+        ):
+            self.centers.append(
+                new_position.copy()
+            )
+
+        return False
     
 
     def simulate(self, max_iters=1_000_000):
@@ -203,11 +213,21 @@ class ABPMetaDynamics:
             bias_width=self.sigma,
             metadata={
                 "dimension": self.dimension,
-                "deposition_batch_size": self.num_steps - 1,
+                "deposition_batch_size": self.deposition_stride - 1,
             },
         )
 
 
-    def run(self, max_iters=1_000_000):
-        self.simulate(max_iters=max_iters)
+    def run(self, max_steps=1_000_000):
+        max_steps = int(max_steps)
+
+        if max_steps <= 0:
+            raise ValueError(
+                "max_steps must be strictly positive."
+            )
+
+        for _ in range(max_steps):
+            if self.step():
+                break
+
         return self.result()

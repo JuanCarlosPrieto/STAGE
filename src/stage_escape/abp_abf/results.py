@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
+
+TerminationReason = Literal[
+    "transition",
+    "max_steps",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -18,6 +23,7 @@ class SimulationResult:
     transition_index: int | None
     physical_time: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    termination_reason: TerminationReason
 
     @property
     def n_steps(self) -> int:

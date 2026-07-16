@@ -1,18 +1,17 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 class ABFRealTime:
     def __init__(
         self,
-        num_steps,
+        deposition_stride,
         td,
         delta_t,
         D=1.0,
         initial_position=None,
         b=lambda x: 0,
         bins=100,
-        range=(-3, 3),
+        value_range=(-3, 3),
         seed=None,
         rng=None,
         profile_update_stride=100,
@@ -20,7 +19,7 @@ class ABFRealTime:
         if seed is not None and rng is not None:
             raise ValueError("Provide either seed or rng, not both.")
 
-        self.num_steps = num_steps
+        self.deposition_stride = deposition_stride
         self.td = td
         self.delta_t = delta_t
         self.bias_potential = np.zeros(bins)
@@ -31,7 +30,7 @@ class ABFRealTime:
         self.force_bias = np.zeros(bins)  # Initialize force bias for each dimension and bin
         self.number_of_copies = np.zeros(bins)  # Initialize number of copies for each dimension and bin
         self.bins = bins  # Number of bins for the biasing potential
-        self.range = range  # Range for the biasing potential
+        self.value_range = value_range  # Range for the biasing potential
         self.free_energy_profile = np.zeros(bins)  # Initialize free energy profile
         self.real_time = 0.0
         
@@ -71,7 +70,7 @@ class ABFRealTime:
 
     def position_to_bin(self, position):
         x = float(np.asarray(position).reshape(-1)[0])
-        bin_index = int((x - self.range[0]) / (self.range[1] - self.range[0]) * self.bins)
+        bin_index = int((x - self.value_range[0]) / (self.value_range[1] - self.value_range[0]) * self.bins)
         return np.clip(bin_index, 0, self.bins - 1)
 
 
@@ -187,47 +186,65 @@ class ABFRealTime:
         ):
             self.update_profiles()
 
-        # Only the newly generated point needs to be checked here.
-        self.td.positions = np.asarray(
-            [new_position],
+        return self.td.is_transition(new_position)
+
+    def step(self) -> bool:
+        current_position = self._last_position()
+
+        physical_gradient = np.asarray(
+            self.b.potential_prime_at(current_position),
             dtype=float,
         )
+        bias_gradient = self.bias_potential_prime_at(
+            current_position
+        )
 
-        return self.td.detect_transition() is not None
+        drift = -(
+            physical_gradient + bias_gradient
+        ) * self.delta_t
 
-    def simulate_steps(self, num_steps=None):
-        """
-        Perform a batch of integration steps.
+        noise = (
+            np.sqrt(2.0 * self.D * self.delta_t)
+            * self.rng.standard_normal(self.dimension)
+        )
 
-        Parameters
-        ----------
-        num_steps : int or None
-            Number of steps in the batch. When None, ``self.num_steps``
-            is used.
+        new_position = (
+            current_position
+            + drift
+            + noise
+        )
 
-        Returns
-        -------
-        int or None
-            Global trajectory index of the transition, or None.
-        """
-        steps = self.num_steps if num_steps is None else num_steps
+        bias_value = self.bias_potential_at(
+            new_position
+        )
+        weight = np.exp(bias_value / self.D)
 
-        if isinstance(steps, bool) or not isinstance(
-            steps,
-            (int, np.integer),
+        if not np.isfinite(weight):
+            raise FloatingPointError(
+                "The ABP reweighting factor is not finite."
+            )
+
+        self.positions.append(new_position)
+        self.weights.append(weight)
+        self.real_time += weight * self.delta_t
+        self.steps_completed += 1
+
+        if self.td.is_transition(new_position):
+            self.transition_index = (
+                len(self.positions) - 1
+            )
+            return True
+
+        if (
+            self.steps_completed
+            % self.deposition_stride
+            == 0
         ):
-            raise TypeError("num_steps must be an integer.")
+            self.centers.append(
+                new_position.copy()
+            )
 
-        if steps <= 0:
-            raise ValueError("num_steps must be strictly positive.")
-
-        for _ in range(int(steps)):
-            transition_detected = self.simulate_one_step()
-
-            if transition_detected:
-                return len(self.positions) - 1
-
-        return None
+        return False
 
     def simulate(self, max_iters=1_000_000):
         """
@@ -329,16 +346,11 @@ class ABFRealTime:
         )
 
 
-    def run(self, max_iters=1_000_000):
-        self.simulate(max_iters=max_iters)
+    def run(self, max_steps=1_000_000):
+        for _ in range(max_steps):
+            if self.step():
+                break
+
+        self.update_profiles()
         return self.result()
-
-
-    def plot_free_energy(self):
-        bin_centers = np.linspace(self.range[0], self.range[1], self.bins)  # Calculate bin centers for plotting
-        plt.plot(bin_centers, self.free_energy_profile)  # Plot the free energy profile
-        plt.xlabel('Position')  # Label for x-axis
-        plt.ylabel('Free Energy')  # Label for y-axis
-        plt.title('Free Energy Profile')  # Title of the plot
-        plt.grid()  # Add grid to the plot
-        plt.show()  # Display the plot
+    

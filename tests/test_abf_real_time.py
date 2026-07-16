@@ -16,8 +16,7 @@ def zero_potential():
 
 def inactive_detector():
     return TransitionDetector(
-        positions=np.empty((0, 1)),
-        cv=lambda x: float(np.asarray(x)[0]),
+        collective_variable=lambda x: float(x[0]),
         threshold=np.inf,
     )
 
@@ -41,7 +40,7 @@ def quadratic_potential():
 
 def build_quadratic_simulation(seed):
     return ABFRealTime(
-        num_steps=10,
+        deposition_stride=10,
         td=inactive_detector(),
         delta_t=1e-3,
         D=0.2,
@@ -55,7 +54,7 @@ def build_quadratic_simulation(seed):
 
 def build_simulation(seed):
     return ABFRealTime(
-        num_steps=10,
+        deposition_stride=10,
         td=inactive_detector(),
         delta_t=1e-3,
         D=0.2,
