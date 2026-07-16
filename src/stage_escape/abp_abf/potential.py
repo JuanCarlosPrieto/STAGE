@@ -11,18 +11,17 @@ from ._validation import (
     validate_positive_int,
 )
 
-
 ScalarFunction = Callable[[np.ndarray], float]
 GradientFunction = Callable[[np.ndarray], np.ndarray]
 HessianFunction = Callable[[np.ndarray], np.ndarray]
 
 
 class Potential:
-    """Scalar potential and its first two derivatives.
+    """Scalar potential and optional analytic first and second derivatives.
 
-    Analytic derivatives are optional. Missing derivatives are evaluated with
-    centered finite differences, which are more accurate and less biased than
-    the forward differences previously used by the project.
+    Missing derivatives are evaluated with centered finite differences. The
+    object keeps the historical ``potential``, ``potential_prime`` and
+    ``potential_biprime`` attributes for notebook compatibility.
     """
 
     def __init__(
@@ -39,23 +38,29 @@ class Potential:
             raise TypeError("first_derivative must be callable or None.")
         if second_derivative is not None and not callable(second_derivative):
             raise TypeError("second_derivative must be callable or None.")
-
-        # Preserve the historical public attribute names for notebook
-        # compatibility while giving them a rigorously validated interface.
         self.potential = function
         self.potential_prime = first_derivative
         self.potential_biprime = second_derivative
 
     @classmethod
-    def zero(cls, dimension: int) -> "Potential":
+    def zero(cls, dimension: int) -> Potential:
         dimension = validate_positive_int("dimension", dimension)
         return cls(
             dimension=dimension,
-            function=lambda x: 0.0,
-            first_derivative=lambda x: np.zeros(dimension, dtype=float),
-            second_derivative=lambda x: np.zeros(
+            function=lambda _x: 0.0,
+            first_derivative=lambda _x: np.zeros(dimension, dtype=float),
+            second_derivative=lambda _x: np.zeros(
                 (dimension, dimension), dtype=float
             ),
+        )
+
+    def copy(self) -> Potential:
+        """Return a callable snapshot of the current potential definition."""
+        return Potential(
+            dimension=self.dimension,
+            function=self.potential,
+            first_derivative=self.potential_prime,
+            second_derivative=self.potential_biprime,
         )
 
     def _point(self, point) -> np.ndarray:
@@ -72,9 +77,7 @@ class Potential:
     ) -> np.ndarray:
         point = self._point(point)
         if self.potential_prime is not None:
-            gradient = np.asarray(
-                self.potential_prime(point), dtype=float
-            ).reshape(-1)
+            gradient = np.asarray(self.potential_prime(point), dtype=float).reshape(-1)
             if gradient.size != self.dimension:
                 raise ValueError(
                     "first_derivative must return exactly "
@@ -102,9 +105,7 @@ class Potential:
     ) -> np.ndarray:
         point = self._point(point)
         if self.potential_biprime is not None:
-            hessian = np.asarray(
-                self.potential_biprime(point), dtype=float
-            )
+            hessian = np.asarray(self.potential_biprime(point), dtype=float)
             expected_shape = (self.dimension, self.dimension)
             if hessian.shape != expected_shape:
                 raise ValueError(
@@ -118,7 +119,6 @@ class Potential:
         epsilon = validate_positive_float("epsilon", epsilon)
         hessian = np.empty((self.dimension, self.dimension), dtype=float)
         f0 = self.potential_at(point)
-
         for i in range(self.dimension):
             ei = np.zeros(self.dimension, dtype=float)
             ei[i] = epsilon
@@ -127,7 +127,6 @@ class Potential:
                 - 2.0 * f0
                 + self.potential_at(point - ei)
             ) / epsilon**2
-
             for j in range(i + 1, self.dimension):
                 ej = np.zeros(self.dimension, dtype=float)
                 ej[j] = epsilon
@@ -139,7 +138,6 @@ class Potential:
                 ) / (4.0 * epsilon**2)
                 hessian[i, j] = mixed
                 hessian[j, i] = mixed
-
         return hessian
 
     def with_gaussian(
@@ -147,13 +145,20 @@ class Potential:
         center,
         height: float,
         width: float,
-    ) -> "Potential":
-        """Return a new potential with an added isotropic Gaussian."""
+    ) -> Potential:
+        """Return a new potential with an added isotropic Gaussian.
+
+        A snapshot of the base potential is captured. This is essential for
+        the legacy mutating ``add_gaussian`` method: closures must not call
+        back into the object after its public callables have been replaced.
+        """
         center = as_position(center, self.dimension, name="center")
         height = float(height)
         width = validate_positive_float("width", width)
         if not np.isfinite(height):
             raise ValueError("height must be finite.")
+
+        base = self.copy()
 
         def gaussian(x: np.ndarray) -> float:
             difference = x - center
@@ -173,21 +178,17 @@ class Potential:
 
         return Potential(
             dimension=self.dimension,
-            function=lambda x: self.potential_at(x) + gaussian(x),
+            function=lambda x: base.potential_at(x) + gaussian(x),
             first_derivative=lambda x: (
-                self.potential_prime_at(x) + gaussian_gradient(x)
+                base.potential_prime_at(x) + gaussian_gradient(x)
             ),
             second_derivative=lambda x: (
-                self.potential_biprime_at(x) + gaussian_hessian(x)
+                base.potential_biprime_at(x) + gaussian_hessian(x)
             ),
         )
 
-    def add_gaussian(self, center, height: float, width: float) -> "Potential":
-        """Mutate this potential for backward compatibility.
-
-        New code should prefer :meth:`with_gaussian`, which avoids hidden
-        mutation and is easier to reason about in reproducible experiments.
-        """
+    def add_gaussian(self, center, height: float, width: float) -> Potential:
+        """Mutate this potential while preserving backward compatibility."""
         combined = self.with_gaussian(center, height, width)
         self.potential = combined.potential
         self.potential_prime = combined.potential_prime

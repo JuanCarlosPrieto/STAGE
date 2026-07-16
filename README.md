@@ -1,384 +1,149 @@
-# STAGE
+# STAGE — refactored simulation core
 
-Research code for the numerical study of Brownian dynamics, metastable transitions, adaptive biasing methods, and narrow escape problems.
+This tree is a reviewed refactor of commit `6f50424` of the STAGE repository. It keeps the research scope—Brownian dynamics, narrow escape, ABP and ABF—but gives the simulation core explicit contracts, exact step semantics, reproducible random-number handling, immutable result objects and tested persistence.
 
-This repository was developed during a research internship and contains implementations of direct Monte Carlo simulations, Adaptive Biasing Potential (ABP), Adaptive Biasing Force (ABF), transition-time estimators, geometric escape detection, statistical analysis tools, and exploratory notebooks.
-
-## Project objectives
-
-The main objective is to study rare transitions and escape events in stochastic systems, with particular emphasis on:
-
-* Brownian motion in one and two dimensions;
-* metastable potentials and transition times;
-* narrow escape problems with small absorbing windows;
-* direct and equivalent narrow escape formulations;
-* Adaptive Biasing Potential methods;
-* Adaptive Biasing Force methods;
-* reconstruction of equilibrium distributions;
-* estimation of physical transition and escape times;
-* comparison between direct and accelerated sampling methods.
-
-The project also aims to provide reproducible numerical experiments and publication-quality figures for the final internship report.
-
-## Repository structure
+## Architecture
 
 ```text
-STAGE/
-├── notebooks/                  # Exploratory analyses and numerical experiments
-├── src/
-│   └── stage_escape/
-│       ├── abp_abf/            # ABP, ABF, potentials and transition detection
-│       ├── brownian.py         # Brownian dynamics
-│       ├── escape.py           # Escape-window definitions
-│       ├── geometry_utilities.py
-│       ├── naive_narrow_escape.py
-│       ├── equivalent_narrow_escape.py
-│       ├── statistics.py
-│       ├── surface.py
-│       └── visualization.py
-├── tests/                      # Automated tests
-├── pyproject.toml              # Package configuration and dependencies
-├── requirements.txt            # Environment dependencies
-└── README.md
+src/stage_escape/
+├── brownian.py                    # Euler–Maruyama proposals and one-step integration
+├── surface.py                     # implicit domains and earliest boundary crossing
+├── escape.py                      # absorbing-window predicates
+├── narrow_escape_result.py        # shared immutable result contract
+├── _narrow_escape_base.py         # shared narrow-escape state and validation
+├── naive_narrow_escape.py         # direct geometric narrow escape
+├── equivalent_narrow_escape.py    # equivalent/end-point escape formulation
+├── result_io.py                   # versioned JSON + NPZ persistence
+├── statistics.py                  # estimators and opt-in plotting helpers
+├── visualization.py               # plotting without implicit plt.show()
+└── abp_abf/
+    ├── _adaptive_base.py          # shared ABP/ABF RNG, clock and step-cap logic
+    ├── potential.py               # scalar potential and derivatives
+    ├── transition_detector.py     # stateless threshold detector
+    ├── abp_metadynamics.py        # Gaussian metadynamics/ABP
+    ├── abf_real_time.py           # one-dimensional online ABF
+    ├── abp_bias.py                # vectorized Gaussian bias primitives
+    ├── abf_profiles.py            # force-profile integration
+    ├── distribution_analysis.py   # weighted densities and theoretical laws
+    └── results.py                 # immutable ABP/ABF result contracts
 ```
 
-The codebase is currently being refactored to separate:
-
-1. stochastic simulation;
-2. geometry and escape detection;
-3. statistical post-processing;
-4. visualization;
-5. reproducible report-generation workflows.
+Simulation, post-processing, plotting and persistence are separate. Simulation methods return result objects; plotting functions return Matplotlib `(figure, axes)` objects and only display when `show=True`.
 
 ## Installation
-
-Clone the repository:
-
-```bash
-git clone https://github.com/JuanCarlosPrieto/STAGE.git
-cd STAGE
-```
-
-Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-```
-
-On Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-Upgrade `pip` and install the package in editable mode:
-
-```bash
 python -m pip install --upgrade pip
-python -m pip install -e .
-```
-
-For development and testing:
-
-```bash
 python -m pip install -e ".[dev]"
 ```
 
-When the optional development dependencies are not available through `pyproject.toml`, install the requirements directly:
+Notebook dependencies are optional:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -e ".[notebook]"
 ```
 
-## Running the tests
-
-Run the complete test suite from the repository root:
+## Verification
 
 ```bash
 python -m pytest -q
+python -m pytest -q --cov=stage_escape --cov-report=term-missing
+ruff check .
 ```
 
-For detailed output:
+The supplied suite verifies Brownian reproducibility, ABP/ABF reproducibility, exact total-step caps, online ABF visit counting, transition detection, Gaussian-potential composition, geometric boundary intersections, direct and equivalent narrow escape, result immutability, versioned persistence, numerical distributions and non-blocking plotting.
 
-```bash
-python -m pytest -vv
-```
-
-Run a specific test file:
-
-```bash
-python -m pytest tests/test_abf_real_time.py -vv
-```
-
-The tests currently focus on:
-
-* random-number reproducibility;
-* Brownian trajectory generation;
-* dimensional consistency;
-* ABP and ABF behavior;
-* deterministic results for fixed seeds;
-* numerical validity of reconstructed quantities.
-
-## Reproducibility
-
-All stochastic simulations should receive an explicit random seed.
-
-Two simulations using the same:
-
-* initial condition;
-* physical parameters;
-* numerical parameters;
-* potential;
-* transition criterion;
-* random seed;
-
-should produce identical trajectories and estimators.
-
-Example convention:
-
-```python
-seed = 123
-```
-
-For Monte Carlo experiments, each independent realization should use a distinct but recorded seed.
-
-A reproducible numerical result should store at least:
-
-```text
-seed
-diffusion coefficient
-time step
-number of integration steps
-initial position
-potential parameters
-biasing parameters
-transition criterion
-number of replicas
-Git commit
-```
-
-## Main components
-
-### Brownian dynamics
-
-The Brownian motion implementation is based on the overdamped stochastic differential equation
-
-[
-dX_t = b(X_t),dt + \sqrt{2D},dW_t,
-]
-
-where:
-
-* (X_t) is the particle position;
-* (b(X_t)) is the deterministic drift;
-* (D) is the diffusion coefficient;
-* (W_t) is a standard Wiener process.
-
-The numerical implementation uses an Euler–Maruyama discretization.
-
-### Narrow escape problem
-
-The narrow escape problem studies the time required for a Brownian particle to leave a bounded domain through one or more small absorbing windows.
-
-The repository contains two approaches:
-
-* `NaiveNarrowEscape`: direct geometric simulation inside the physical domain;
-* `EquivalentNarrowEscape`: simulation of an equivalent formulation based on an effective potential or transformed problem.
-
-The direct approach includes:
-
-* domain-boundary detection;
-* escape-window detection;
-* trajectory processing;
-* estimation of escape locations and escape times.
-
-### Adaptive Biasing Potential
-
-The ABP implementation progressively constructs a biasing potential in order to flatten energetic barriers and increase the frequency of rare transitions.
-
-The method stores deposited bias contributions and evaluates:
-
-* the physical potential;
-* the biasing potential;
-* the effective potential;
-* statistical weights;
-* transition events.
-
-The weighted trajectory can then be used to reconstruct physical distributions and observables.
-
-### Adaptive Biasing Force
-
-The ABF implementation estimates the mean force along a discretized reaction coordinate.
-
-For a one-dimensional reaction coordinate, the state space is divided into bins. The algorithm estimates the mean physical force in every visited bin and constructs an adaptive bias from this estimator.
-
-The ABF implementation is currently restricted to one-dimensional potentials.
-
-### Transition detection
-
-Transition events are detected using a collective variable and a threshold criterion.
-
-A typical detector evaluates:
-
-[
-\xi(X_t) \geq \xi_{\mathrm{threshold}},
-]
-
-where (\xi) is a collective variable.
-
-The transition detector returns the index of the first trajectory point satisfying the transition condition.
-
-### Statistical analysis
-
-The statistical utilities are used to estimate:
-
-* empirical probability densities;
-* weighted histograms;
-* mean transition times;
-* mean escape times;
-* exponential-law parameters;
-* uncertainty indicators;
-* comparisons between numerical and theoretical distributions.
-
-## Notebooks
-
-The `notebooks/` directory contains exploratory numerical experiments.
-
-Typical notebook topics include:
-
-* Brownian motion validation;
-* direct narrow escape simulations;
-* equivalent narrow escape formulations;
-* ABP behavior in one and two dimensions;
-* reconstruction of equilibrium densities;
-* exponential transition-time distributions;
-* parameter sensitivity;
-* comparison of direct and biased methods.
-
-The notebooks are intended for exploration and interpretation. Long simulations should progressively be moved to standalone scripts, while notebooks should load previously generated data.
-
-Recommended workflow:
-
-```text
-simulation script
-    ↓
-raw numerical results
-    ↓
-processed data
-    ↓
-analysis notebook
-    ↓
-report figure
-```
-
-## Numerical validation
-
-Before using a result in a report, the following checks should be performed.
+## Core usage
 
 ### Brownian motion
 
-Without drift:
+```python
+from stage_escape import BrownianMotion
 
-[
-\mathbb{E}[X_t] \approx X_0,
-]
+motion = BrownianMotion(
+    deposition_stride=100,
+    delta_t=1e-3,
+    dimension=2,
+    D=0.2,
+    initial_position=[0.0, 0.0],
+    seed=123,
+)
 
-and
-
-[
-\operatorname{Var}(X_t) \approx 2Dt.
-]
-
-### Equilibrium distribution
-
-For a system with potential (V), the theoretical equilibrium density is
-
-[
-\rho(x)
-=======
-
-\frac{1}{Z}
-\exp\left(-\frac{V(x)}{D}\right),
-]
-
-where
-
-[
-Z
-=
-
-\int
-\exp\left(-\frac{V(x)}{D}\right),dx.
-]
-
-Weighted ABP or ABF results should be compared against this theoretical density.
-
-### Time-step convergence
-
-Results should be compared for several values of the integration time step:
-
-```text
-Δt
-Δt / 2
-Δt / 4
+motion.step()       # exactly one Euler–Maruyama step
+path = motion.simulate()  # historical block API retained
 ```
 
-Relevant observables should stabilize as the time step decreases.
-
-### Monte Carlo uncertainty
-
-Transition and escape times should be estimated using several independent realizations.
-
-Reported results should include an uncertainty measure such as:
-
-* standard error;
-* confidence interval;
-* bootstrap confidence interval.
-
-The standard deviation of individual escape times should not be confused with the uncertainty of the estimated mean.
-
-## Report figures
-
-Final figures should be generated independently from the simulation code.
-
-Recommended report figures include:
-
-1. geometry of the narrow escape problem;
-2. representative Brownian trajectory;
-3. validation of Brownian variance;
-4. physical and biasing potentials;
-5. weighted empirical density versus theoretical density;
-6. transition-time distribution;
-7. survival function;
-8. mean escape time as a function of the escape-window size;
-9. comparison of direct and adaptive methods;
-10. computational efficiency and estimator variance.
-
-Figures should preferably be saved in both formats:
-
-```text
-PDF: vector format for the written report
-PNG: high-resolution raster format for presentations
-```
-
-Recommended export parameters:
+### ABP
 
 ```python
-fig.savefig(
-    "figure.pdf",
-    bbox_inches="tight",
-)
+import numpy as np
+from stage_escape.abp_abf import ABPMetaDynamics, Potential, TransitionDetector
 
-fig.savefig(
-    "figure.png",
-    dpi=300,
-    bbox_inches="tight",
+potential = Potential(
+    dimension=1,
+    function=lambda x: 0.25 * (x[0] ** 2 - 1.0) ** 2,
+    first_derivative=lambda x: np.array([x[0] * (x[0] ** 2 - 1.0)]),
 )
+detector = TransitionDetector(lambda x: x[0], threshold=0.8)
+
+simulation = ABPMetaDynamics(
+    deposition_stride=100,
+    transition_detector=detector,
+    delta_t=1e-3,
+    D=0.1,
+    initial_position=[-1.0],
+    b=potential,
+    W=0.01,
+    sigma=0.15,
+    seed=123,
+)
+result = simulation.run(max_steps=100_000)
 ```
 
-Plotting functions should return `fig` and `ax` and should avoid calling `plt.show()` internally.
+`max_steps` is a total trajectory cap. A later call with a larger value continues the same trajectory. `simulate(max_iters=...)` remains as a compatibility alias.
 
-## Author
+### Direct narrow escape
 
-Juan Carlos Prieto Calderón
+```python
+from stage_escape import BrownianMotion, Escape, NaiveNarrowEscape, Surface
+
+surface = Surface("unit disk", [lambda p: p[0] ** 2 + p[1] ** 2 - 1.0])
+escape = Escape([
+    lambda p: p[0] > 0.99,
+    lambda p: abs(p[1]) < 0.1,
+])
+motion = BrownianMotion(100, 1e-4, dimension=2, D=1.0, seed=123)
+result = NaiveNarrowEscape(motion, surface, [escape]).run(max_steps=1_000_000)
+```
+
+The direct solver determines the earliest admissible boundary intersection along each proposal and computes the escape time with sub-step interpolation.
+
+## Persistence
+
+```python
+from stage_escape.result_io import load_result, save_result
+
+save_result(result, "artifacts/reference")
+loaded = load_result("artifacts/reference")
+```
+
+Metadata is stored in JSON and numerical arrays in compressed NPZ. Writes are atomic per file, schema versions are validated, and schemas 1–3 are readable.
+
+## Reproducible scripts
+
+```bash
+python scripts/run_abp_abf_smoke.py --steps 200 --seed 123
+python scripts/run_reference_1d.py --steps 100000 --seed 2026
+python scripts/make_report_figures.py artifacts/reference_1d
+```
+
+Long simulations should run in scripts and save results. Notebooks should load those results for interpretation and figure composition.
+
+## Compatibility notes
+
+- `ABPMetaDynamics` is the canonical class; `ABPMetadynamics` is retained as an alias.
+- `simulate(max_iters=...)` remains available for ABP and ABF.
+- `run_simulation_straight_exit()` and `run_simulation()` remain deprecated wrappers around the unified `NarrowEscapeResult` API.
+- Plotting no longer calls `plt.show()` unless explicitly requested.

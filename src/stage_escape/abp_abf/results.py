@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 import numpy as np
 
-
 TerminationReason = Literal["transition", "max_steps"]
 
 
-def _readonly_array(value, *, dtype=float, ndim: int | None = None) -> np.ndarray:
+def _readonly_array(
+    value,
+    *,
+    dtype=float,
+    ndim: int | None = None,
+) -> np.ndarray:
     array = np.array(value, dtype=dtype, copy=True)
     if ndim is not None and array.ndim != ndim:
         raise ValueError(f"Expected an array with {ndim} dimensions.")
@@ -17,6 +24,17 @@ def _readonly_array(value, *, dtype=float, ndim: int | None = None) -> np.ndarra
         raise ValueError("Result arrays must contain only finite values.")
     array.setflags(write=False)
     return array
+
+
+def _readonly_integer_array(value, *, ndim: int) -> np.ndarray:
+    raw = np.asarray(value)
+    if raw.ndim != ndim:
+        raise ValueError(f"Expected an array with {ndim} dimensions.")
+    if not np.issubdtype(raw.dtype, np.integer):
+        numeric = np.asarray(value, dtype=float)
+        if not np.all(np.isfinite(numeric)) or not np.all(numeric == np.floor(numeric)):
+            raise ValueError("Integer result arrays must contain integer values.")
+    return _readonly_array(value, dtype=np.int64, ndim=ndim)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -31,7 +49,7 @@ class SimulationResult:
     transition_index: int | None
     physical_time: float
     termination_reason: TerminationReason
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         positions = _readonly_array(self.positions, ndim=2)
@@ -49,6 +67,12 @@ class SimulationResult:
             raise ValueError("physical_time must be finite and non-negative.")
         if self.termination_reason not in {"transition", "max_steps"}:
             raise ValueError("Invalid termination_reason.")
+
+        seed = self.seed
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
+                raise TypeError("seed must be an integer or None.")
+            seed = int(seed)
 
         transition_index = self.transition_index
         if transition_index is not None:
@@ -69,12 +93,14 @@ class SimulationResult:
                 "termination_reason='transition' requires transition_index."
             )
 
+        metadata = MappingProxyType(deepcopy(dict(self.metadata)))
         object.__setattr__(self, "positions", positions)
         object.__setattr__(self, "delta_t", delta_t)
         object.__setattr__(self, "diffusion", diffusion)
+        object.__setattr__(self, "seed", seed)
         object.__setattr__(self, "physical_time", physical_time)
         object.__setattr__(self, "transition_index", transition_index)
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "metadata", metadata)
 
     @property
     def dimension(self) -> int:
@@ -101,7 +127,6 @@ class SimulationResult:
 
     @property
     def reweighted_time(self) -> float:
-        """Alias clarifying the meaning of ``physical_time``."""
         return self.physical_time
 
 
@@ -116,6 +141,8 @@ class ABPResult(SimulationResult):
 
     def __post_init__(self) -> None:
         super(ABPResult, self).__post_init__()
+        if self.method != "abp":
+            raise ValueError("ABPResult requires method='abp'.")
         weights = _readonly_array(self.weights, ndim=1)
         centers = _readonly_array(self.centers, ndim=2)
         if len(weights) != len(self.positions):
@@ -150,11 +177,13 @@ class ABFResult(SimulationResult):
 
     def __post_init__(self) -> None:
         super(ABFResult, self).__post_init__()
+        if self.method != "abf":
+            raise ValueError("ABFResult requires method='abf'.")
         if self.dimension != 1:
             raise ValueError("ABFResult only supports one-dimensional paths.")
 
         force_bias = _readonly_array(self.force_bias, ndim=1)
-        visit_counts = _readonly_array(self.visit_counts, dtype=np.int64, ndim=1)
+        visit_counts = _readonly_integer_array(self.visit_counts, ndim=1)
         bin_edges = _readonly_array(self.bin_edges, ndim=1)
         free_energy = _readonly_array(self.free_energy, ndim=1)
         bias_potential = _readonly_array(self.bias_potential, ndim=1)
@@ -184,3 +213,6 @@ class ABFResult(SimulationResult):
         centers = 0.5 * (self.bin_edges[:-1] + self.bin_edges[1:])
         centers.setflags(write=False)
         return centers
+
+# Explicit name used by the public API; SimulationResult remains compatible.
+AdaptiveSimulationResult = SimulationResult

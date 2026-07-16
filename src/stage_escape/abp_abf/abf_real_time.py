@@ -4,29 +4,26 @@ from typing import Literal
 
 import numpy as np
 
+from ._adaptive_base import AdaptiveSimulationBase
 from ._validation import (
     as_position,
-    prepare_rng,
-    validate_positive_float,
+    safe_exponential,
     validate_positive_int,
-    validate_transition_detector,
 )
 from .abf_profiles import reconstruct_abf_profiles
 from .potential import Potential
 from .results import ABFResult, TerminationReason
 from .transition_detector import TransitionDetector
 
-
 OutOfRangePolicy = Literal["raise", "clip"]
 
 
-class ABFRealTime:
+class ABFRealTime(AdaptiveSimulationBase):
     """One-dimensional adaptive biasing force simulation.
 
     ``force_bias`` stores the running estimate of the physical potential
-    derivative in each bin. The applied bias force is therefore
-    ``+force_bias`` in the overdamped drift, cancelling ``-V'`` as sampling
-    converges.
+    derivative in each bin. The resulting positive force contribution cancels
+    the physical force ``-V'`` as the estimator converges.
     """
 
     def __init__(
@@ -43,9 +40,6 @@ class ABFRealTime:
         profile_update_stride=1,
         out_of_range: OutOfRangePolicy = "raise",
     ) -> None:
-        self.delta_t = validate_positive_float("delta_t", delta_t)
-        self.dimension = 1
-        self.D = validate_positive_float("D", D)
         self.bins = validate_positive_int("bins", bins, minimum=2)
         self.profile_update_stride = validate_positive_int(
             "profile_update_stride", profile_update_stride
@@ -53,7 +47,6 @@ class ABFRealTime:
         if out_of_range not in {"raise", "clip"}:
             raise ValueError("out_of_range must be either 'raise' or 'clip'.")
         self.out_of_range: OutOfRangePolicy = out_of_range
-
         try:
             lower, upper = value_range
         except (TypeError, ValueError) as error:
@@ -66,29 +59,26 @@ class ABFRealTime:
             raise ValueError("value_range must contain finite increasing bounds.")
         self.value_range = (lower, upper)
 
-        validate_transition_detector(transition_detector)
-        self.transition_detector: TransitionDetector | None = transition_detector
-        self.seed = seed
-        self.rng, self._external_rng = prepare_rng(seed=seed, rng=rng)
-        self.initial_position = as_position(
-            np.zeros(1) if initial_position is None else initial_position,
-            1,
-            name="initial_position",
+        super().__init__(
+            transition_detector=transition_detector,
+            delta_t=delta_t,
+            dimension=1,
+            D=D,
+            initial_position=initial_position,
+            seed=seed,
+            rng=rng,
         )
+        self.transition_detector: TransitionDetector | None
         self._range_adjusted_position(self.initial_position)
-
         self.b = Potential.zero(1) if b is None else b
         if not callable(getattr(self.b, "potential_prime_at", None)):
             raise TypeError("b must provide potential_prime_at(position).")
         if getattr(self.b, "dimension", 1) != 1:
             raise ValueError("ABFRealTime requires a one-dimensional potential.")
-
         self.reset(reset_rng=False)
 
     def reset(self, *, reset_rng: bool = True) -> None:
-        if reset_rng and not self._external_rng:
-            self.rng = np.random.default_rng(self.seed)
-        self.positions = [self.initial_position.copy()]
+        self._reset_common(reset_rng=reset_rng)
         self.force_bias = np.zeros(self.bins, dtype=float)
         self.number_of_copies = np.zeros(self.bins, dtype=np.int64)
         self.bin_edges = np.linspace(
@@ -96,13 +86,11 @@ class ABFRealTime:
         )
         self.free_energy_profile = np.zeros(self.bins, dtype=float)
         self.bias_potential = np.zeros(self.bins, dtype=float)
-        self.real_time = 0.0
-        self.steps_completed = 0
-        self.transition_index: int | None = None
-        self.termination_reason: TerminationReason | None = None
 
-    def _last_position(self) -> np.ndarray:
-        return np.asarray(self.positions[-1], dtype=float)
+    @property
+    def visit_counts(self) -> np.ndarray:
+        """Alias using the result-object terminology."""
+        return self.number_of_copies
 
     def _range_adjusted_position(self, position) -> float:
         x = float(as_position(position, 1)[0])
@@ -145,13 +133,7 @@ class ABFRealTime:
         self.number_of_copies[current_bin] = count + 1
         return current_bin
 
-    def _transition_detected_at(self, position) -> bool:
-        return (
-            self.transition_detector is not None
-            and self.transition_detector.is_transition(position)
-        )
-
-    def update_profiles(self):
+    def update_profiles(self) -> tuple[np.ndarray, np.ndarray]:
         (
             self.bin_edges,
             self.free_energy_profile,
@@ -170,39 +152,34 @@ class ABFRealTime:
         current_position = self._last_position()
         current_bin = self._current_bin()
         physical_gradient = self._potential_gradient_scalar(current_position)
-        applied_bias = float(self.bias_potential[current_bin])
-
+        bias_energy = float(self.bias_potential[current_bin])
         drift = np.array(
-            [(-physical_gradient + self.force_bias[current_bin]) * self.delta_t],
+            [
+                (-physical_gradient + self.force_bias[current_bin])
+                * self.delta_t
+            ],
             dtype=float,
         )
-        noise = (
-            np.sqrt(2.0 * self.D * self.delta_t)
-            * self.rng.standard_normal(1)
+        new_position = self._validated_new_position(
+            current_position + drift + self._noise()
         )
-        new_position = current_position + drift + noise
-        if not np.all(np.isfinite(new_position)):
-            raise FloatingPointError("The new ABF position is not finite.")
-        # Validate before mutating the trajectory. In clip mode only the bin
-        # lookup is clipped; the physical trajectory remains unchanged.
+        # In clip mode, only the bin lookup is clipped; the physical trajectory
+        # and physical force evaluation remain at the actual position.
         self._range_adjusted_position(new_position)
-
-        with np.errstate(over="ignore", invalid="ignore"):
-            time_weight = float(np.exp(applied_bias / self.D))
-        if not np.isfinite(time_weight) or time_weight <= 0.0:
-            raise FloatingPointError("The ABF reweighting factor is invalid.")
+        time_weight = safe_exponential(
+            bias_energy / self.D,
+            name="ABF reweighting factor",
+        )
 
         self.positions.append(new_position.copy())
         self.real_time += time_weight * self.delta_t
         self.steps_completed += 1
         self._update_force_estimator(new_position)
-
         if self.steps_completed % self.profile_update_stride == 0:
             self.update_profiles()
 
         if self._transition_detected_at(new_position):
-            self.transition_index = len(self.positions) - 1
-            self.termination_reason = "transition"
+            self._mark_transition()
             return True
         return False
 
@@ -215,7 +192,6 @@ class ABFRealTime:
                 "transition" if self.transition_index is not None else "max_steps"
             )
         self.update_profiles()
-
         return ABFResult(
             method="abf",
             positions=np.asarray(self.positions, dtype=float).reshape(-1, 1),
@@ -240,19 +216,18 @@ class ABFRealTime:
         )
 
     def run(self, max_steps=1_000_000, *, reset: bool = False) -> ABFResult:
-        max_steps = validate_positive_int("max_steps", max_steps)
+        """Run until transition or until the total step cap is reached."""
         if reset:
             self.reset()
-
         if self._transition_detected_at(self._last_position()):
-            self.transition_index = len(self.positions) - 1
-            self.termination_reason = "transition"
+            self._mark_transition()
             return self.result("transition")
-
-        for _ in range(max_steps):
+        for _ in range(self._remaining_steps(max_steps)):
             if self.step():
                 return self.result("transition")
-
         self.termination_reason = "max_steps"
         return self.result("max_steps")
 
+    def simulate(self, max_iters=1_000_000, *, reset: bool = False) -> ABFResult:
+        """Backward-compatible alias for :meth:`run`."""
+        return self.run(max_steps=max_iters, reset=reset)

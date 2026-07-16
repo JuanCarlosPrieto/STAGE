@@ -1,39 +1,22 @@
-# Brownian Motion Simulation
+from __future__ import annotations
 
-import numpy as np
-import matplotlib.pyplot as plt
-
-from matplotlib.collections import LineCollection
-from matplotlib.colors import LinearSegmentedColormap, Normalize
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
-
-# src/stage_escape/brownian.py
+from collections.abc import Callable
 
 import numpy as np
 
 
-def zero_drift(x):
-    """
-    Default drift field b(x) = 0.
-
-    It returns a vector with the same shape as x.
-    """
+def zero_drift(x: np.ndarray) -> np.ndarray:
+    """Default drift field ``b(x) = 0``."""
     return np.zeros_like(x, dtype=float)
 
 
 class BrownianMotion:
-    """
-    Brownian motion with optional drift.
+    """Euler-Maruyama simulation with optional drift.
 
-    This class intentionally stores the trajectory in self.positions because
-    other parts of the project, especially NaiveNarrowEscape and
-    EquivalentNarrowEscape, mutate and extend this list.
-
-    Discretization:
-
-        X_{n+1} = X_n + b(X_n) dt + sqrt(2D dt) Z_n
-
-    where Z_n is a standard normal random vector.
+    The trajectory remains stored in ``positions`` for compatibility with the
+    narrow-escape simulators. ``step`` advances exactly once. ``simulate``
+    preserves the historical block convention: a block size of ``n`` appends
+    ``n - 1`` new positions because the current point is the first block point.
     """
 
     def __init__(
@@ -43,145 +26,129 @@ class BrownianMotion:
         dimension=1,
         D=1.0,
         initial_position=None,
-        b=zero_drift,
+        b: Callable[[np.ndarray], np.ndarray] = zero_drift,
         seed=None,
         rng=None,
-    ):
+    ) -> None:
+        if isinstance(deposition_stride, bool):
+            raise TypeError("deposition_stride must be an integer.")
         self.deposition_stride = int(deposition_stride)
         self.delta_t = float(delta_t)
         self.dimension = int(dimension)
         self.D = float(D)
+        if not callable(b):
+            raise TypeError("b must be callable.")
         self.b = b
 
         if self.deposition_stride < 2:
             raise ValueError("deposition_stride must be at least 2.")
-
-        if self.delta_t <= 0:
-            raise ValueError("delta_t must be positive.")
-
+        if not np.isfinite(self.delta_t) or self.delta_t <= 0.0:
+            raise ValueError("delta_t must be finite and positive.")
         if self.dimension < 1:
             raise ValueError("dimension must be at least 1.")
-
-        if self.D < 0:
-            raise ValueError("D must be non-negative.")
+        if not np.isfinite(self.D) or self.D < 0.0:
+            raise ValueError("D must be finite and non-negative.")
 
         if initial_position is None:
             initial_position = np.zeros(self.dimension, dtype=float)
         else:
             initial_position = np.asarray(initial_position, dtype=float)
-
         if initial_position.shape != (self.dimension,):
             raise ValueError(
                 f"initial_position must have shape ({self.dimension},), "
                 f"got {initial_position.shape}."
             )
-        
+        if not np.all(np.isfinite(initial_position)):
+            raise ValueError("initial_position must contain finite values.")
+
         if seed is not None and rng is not None:
             raise ValueError("Provide either seed or rng, not both.")
+        if rng is not None and not isinstance(rng, np.random.Generator):
+            raise TypeError("rng must be an instance of numpy.random.Generator.")
+        if seed is not None and (
+            isinstance(seed, bool) or not isinstance(seed, (int, np.integer))
+        ):
+            raise TypeError("seed must be an integer or None.")
 
         self.initial_position = initial_position.copy()
-        self.positions = [self.initial_position.copy()]
-
-        self.seed = seed
+        self.seed = None if seed is None else int(seed)
         self._external_rng = rng is not None
-        self.rng = rng if rng is not None else np.random.default_rng(seed)
-
-
-    def reset(self):
-        """
-        Reset the trajectory to the initial position.
-
-        If the random generator was created from a seed, the generator is also
-        reset, so the same simulation can be reproduced.
-        """
+        self.rng = rng if rng is not None else np.random.default_rng(self.seed)
         self.positions = [self.initial_position.copy()]
 
-        if not self._external_rng:
+    @property
+    def n_steps(self) -> int:
+        return max(len(self.positions) - 1, 0)
+
+    def reset(self, *, reset_rng: bool = True) -> None:
+        """Reset the trajectory and, by default, an internally owned RNG."""
+        self.positions = [self.initial_position.copy()]
+        if reset_rng and not self._external_rng:
             self.rng = np.random.default_rng(self.seed)
 
-
-    def _drift_at(self, position):
-        """
-        Evaluate and validate the drift at the current position.
-
-        Scalar drifts are accepted for backward compatibility and are broadcast
-        to all dimensions.
-        """
+    def _drift_at(self, position) -> np.ndarray:
         drift = np.asarray(self.b(position), dtype=float)
-
         if drift.shape == ():
             drift = np.full(self.dimension, float(drift))
-
         if drift.shape != (self.dimension,):
             raise ValueError(
-                f"Drift must return shape ({self.dimension},), "
-                f"got {drift.shape}."
+                f"Drift must return shape ({self.dimension},), got {drift.shape}."
             )
-
+        if not np.all(np.isfinite(drift)):
+            raise FloatingPointError("The drift returned non-finite values.")
         return drift
 
-    def simulate(self, deposition_stride=None, reset=False):
-        """
-        Extend the Brownian trajectory.
+    def propose(self, position=None) -> np.ndarray:
+        """Generate one proposal without mutating the stored trajectory."""
+        current = (
+            np.asarray(self.positions[-1], dtype=float)
+            if position is None
+            else np.asarray(position, dtype=float)
+        )
+        if current.shape != (self.dimension,):
+            raise ValueError(
+                f"position must have shape ({self.dimension},), got {current.shape}."
+            )
+        drift = self._drift_at(current) * self.delta_t
+        noise = (
+            np.sqrt(2.0 * self.D * self.delta_t)
+            * self.rng.standard_normal(self.dimension)
+        )
+        proposal = current + drift + noise
+        if not np.all(np.isfinite(proposal)):
+            raise FloatingPointError("The Brownian proposal is not finite.")
+        return proposal
 
-        Parameters
-        ----------
-        deposition_stride : int, optional
-            Number of points to generate in this simulation block. If None,
-            self.deposition_stride is used.
+    def step(self) -> np.ndarray:
+        """Advance the trajectory by exactly one integration step."""
+        proposal = self.propose()
+        self.positions.append(proposal.copy())
+        return proposal.copy()
 
-        reset : bool
-            If True, reset the trajectory before simulating.
-
-        Returns
-        -------
-        np.ndarray
-            Array version of self.positions.
-
-        Notes
-        -----
-        By default, this method EXTENDS self.positions instead of replacing it.
-        This is necessary for compatibility with the current narrow escape
-        simulation classes.
-        """
+    def simulate(self, deposition_stride=None, reset=False) -> np.ndarray:
+        """Extend the path by one historical simulation block."""
         if reset:
             self.reset()
-
-        n_steps = self.deposition_stride if deposition_stride is None else int(deposition_stride)
-
-        if n_steps < 2:
+        block_points = (
+            self.deposition_stride
+            if deposition_stride is None
+            else int(deposition_stride)
+        )
+        if block_points < 2:
             raise ValueError("deposition_stride must be at least 2.")
-
-        step_size = np.sqrt(2.0 * self.D * self.delta_t)
-
-        for _ in range(1, n_steps):
-            current_position = self.positions[-1]
-            drift = self._drift_at(current_position) * self.delta_t
-            noise = step_size * self.rng.standard_normal(self.dimension)
-
-            new_position = current_position + drift + noise
-            self.positions.append(new_position)
-
+        for _ in range(block_points - 1):
+            self.step()
         return np.asarray(self.positions, dtype=float)
 
     @staticmethod
     def plot_brownian_path(*args, **kwargs):
-        """
-        Backward-compatible wrapper.
-
-        The actual plotting function lives in visualization.py, but this method
-        is kept so existing notebooks using BrownianMotion.plot_brownian_path(...)
-        do not break.
-        """
+        """Backward-compatible wrapper around the visualization module."""
         from .visualization import plot_brownian_path
 
         return plot_brownian_path(*args, **kwargs)
 
     @staticmethod
     def set_axes_equal_3d(ax, points):
-        """
-        Backward-compatible wrapper.
-        """
         from .visualization import set_axes_equal_3d
 
         return set_axes_equal_3d(ax, points)
