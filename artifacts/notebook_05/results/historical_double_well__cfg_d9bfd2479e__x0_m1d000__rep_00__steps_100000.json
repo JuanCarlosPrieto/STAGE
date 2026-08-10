@@ -1,0 +1,17 @@
+{
+  "bias_height": 0.02,
+  "bias_width": 0.15,
+  "delta_t": 0.001,
+  "diffusion": 0.2,
+  "method": "abp",
+  "parameters": {
+    "cutoff": 5.0,
+    "deposition_stride": 100,
+    "dimension": 1
+  },
+  "physical_time": 7608415.989296965,
+  "schema_version": 3,
+  "seed": 2027,
+  "termination_reason": "max_steps",
+  "transition_index": null
+}
